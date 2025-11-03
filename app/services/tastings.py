@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.db.engine import SessionLocal
 from app.db.models import Infusion, Photo, Tasting
+from app.services.storage import save_photo_bytes
 
 _MAX_CREATE_ATTEMPTS = 2
 
@@ -30,7 +31,7 @@ def _next_seq_for_user(session, user_id: int) -> int:
 def create_tasting(
     tasting_data: dict,
     infusions: Sequence[dict],
-    photo_ids: Sequence[str],
+    photos: Sequence[Any],
 ) -> Tasting:
     """Создаёт дегустацию вместе с проливами и фото."""
 
@@ -59,8 +60,51 @@ def create_tasting(
                             )
                         )
 
-                    for file_id in photo_ids:
-                        session.add(Photo(tasting_id=tasting.id, file_id=file_id))
+                    for photo_entry in photos:
+                        if isinstance(photo_entry, str):
+                            session.add(
+                                Photo(
+                                    tasting_id=tasting.id,
+                                    file_id=photo_entry,
+                                    storage_backend="local",
+                                    telegram_file_id=photo_entry,
+                                )
+                            )
+                            continue
+
+                        if not isinstance(photo_entry, dict):
+                            continue
+
+                        body = photo_entry.get("body")
+                        telegram_file_id = photo_entry.get("telegram_file_id")
+                        if body is None or telegram_file_id is None:
+                            continue
+
+                        filename_hint = (
+                            photo_entry.get("filename_hint")
+                            or photo_entry.get("filename")
+                            or "photo.jpg"
+                        )
+                        result = save_photo_bytes(
+                            tasting_data["user_id"],
+                            tasting.id,
+                            body,
+                            filename_hint=filename_hint,
+                        )
+                        session.add(
+                            Photo(
+                                tasting_id=tasting.id,
+                                file_id=telegram_file_id,
+                                storage_backend=result.storage_backend,
+                                object_key=result.object_key,
+                                content_type=result.content_type,
+                                size_bytes=result.size_bytes,
+                                telegram_file_id=telegram_file_id,
+                                telegram_file_unique_id=photo_entry.get(
+                                    "telegram_file_unique_id"
+                                ),
+                            )
+                        )
 
                 session.refresh(tasting)
                 return tasting
