@@ -3089,7 +3089,7 @@ def setup_handlers(dp: Dispatcher):
     dp.message.register(edit_flow_msg, EditFlow.waiting_text)
 
     # reply-кнопки в самом конце!
-    dp.message.register(reply_buttons_router, F.text & ~Command() & ~CommandStart())
+    dp.message.register(reply_buttons_router, F.text & ~F.text.startswith("/") & ~CommandStart())
 
     # callbacks
     dp.callback_query.register(new_cb, F.data == "new")
