@@ -2,7 +2,7 @@ from logging.config import fileConfig
 import os
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
 from app.config import get_db_url
@@ -16,12 +16,21 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def run_migrations_offline() -> None:
+def _log_connection_info() -> str:
     url = str(get_db_url())
-    _u = make_url(url)
-    _pw = _u.password or ""
-    _safe = url.replace(_pw, "***") if _pw else url
-    print(f"[Alembic] Using DSN: {_safe}")
+    user = os.getenv("POSTGRESQL_USER", "")
+    host = os.getenv("POSTGRESQL_HOST", "")
+    dbname = os.getenv("POSTGRESQL_DBNAME", "")
+    print(f"[Alembic] ENV user={user} host={host} db={dbname}")
+    parsed = make_url(url)
+    password = parsed.password or ""
+    safe_url = url.replace(password, "***") if password else url
+    print(f"[Alembic] DSN: {safe_url}")
+    return url
+
+
+def run_migrations_offline() -> None:
+    url = _log_connection_info()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -34,16 +43,8 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    url = str(get_db_url())
-    _u = make_url(url)
-    _pw = _u.password or ""
-    _safe = url.replace(_pw, "***") if _pw else url
-    print(f"[Alembic] Using DSN: {_safe}")
-    connectable = engine_from_config(
-        {"sqlalchemy.url": url},
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    url = _log_connection_info()
+    connectable = create_engine(url, future=True, pool_pre_ping=True)
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
