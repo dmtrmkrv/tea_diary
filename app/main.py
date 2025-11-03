@@ -23,9 +23,8 @@ from sqlalchemy import func, select
 
 from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
-from app.db.models import Infusion, Photo, Tasting
-from app.handlers import health as public_diag
-from app.routers import diagnostics as diag
+from app.db.models import Infusion, Photo, Tasting, User
+from app.routers.diagnostics import create_router
 from app.utils.admins import get_admin_ids
 from app.services.tastings import create_tasting
 from app.services.users import get_or_create_user, set_user_timezone
@@ -37,19 +36,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 IS_PROD = os.getenv("APP_ENV") == "production"
-ENABLE_PUBLIC_DIAGNOSTICS = os.getenv("ENABLE_PUBLIC_DIAGNOSTICS", "0") == "1"
 ADMINS = get_admin_ids()
-
-if IS_PROD:
-    if ADMINS:
-        DIAGNOSTICS_MODE = "admin"
-    else:
-        DIAGNOSTICS_MODE = "disabled"
-else:
-    if ENABLE_PUBLIC_DIAGNOSTICS:
-        DIAGNOSTICS_MODE = "public"
-    else:
-        DIAGNOSTICS_MODE = "admin"
+DIAGNOSTICS_ENABLED = not (IS_PROD and not ADMINS)
 
 
 # ---------------- ЧАСОВОЙ ПОЯС ----------------
@@ -3046,10 +3034,8 @@ async def tz_cmd(message: Message):
 # ---------------- РЕГИСТРАЦИЯ ХЭНДЛЕРОВ ----------------
 
 def setup_handlers(dp: Dispatcher):
-    if DIAGNOSTICS_MODE == "admin":
-        dp.include_router(diag.router)
-    elif DIAGNOSTICS_MODE == "public":
-        dp.include_router(public_diag.router)
+    if DIAGNOSTICS_ENABLED:
+        dp.include_router(create_router(ADMINS, IS_PROD))
 
     # команды
     dp.message.register(on_start, CommandStart())
@@ -3182,9 +3168,10 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="reset", description="Сброс и меню"),
         BotCommand(command="help", description="Помощь"),
     ]
-    if DIAGNOSTICS_MODE != "disabled":
+    if DIAGNOSTICS_ENABLED:
         commands.extend(
             [
+                BotCommand(command="whoami", description="Проверка статуса"),
                 BotCommand(command="health", description="Проверка БД"),
                 BotCommand(command="dbinfo", description="Сведения о БД"),
             ]

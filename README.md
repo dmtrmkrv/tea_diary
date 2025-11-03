@@ -14,11 +14,10 @@ Configure the following variables (see `.env.example`) when deploying to Timeweb
 - `POSTGRESQL_PASSWORD`
 - `POSTGRESQL_SSLMODE`
 - `ADMINS`
-- `ENABLE_PUBLIC_DIAGNOSTICS`
 
 Locally, the bot falls back to `sqlite:////app/tastings.db` if the full PostgreSQL configuration is not provided.
 
-Set `ADMINS` to a comma-, space-, or semicolon-separated list of Telegram user IDs, for example `ADMINS="12345,67890"` or `ADMINS="12345 67890"`. In production (`APP_ENV=production`) this variable must be populated; otherwise, diagnostic commands that expose database status will be disabled. Use `ENABLE_PUBLIC_DIAGNOSTICS=1` only in development to restore the legacy public `/dbinfo` and `/health` handlers.
+Set `ADMINS` to a comma-, space-, or semicolon-separated list of Telegram user IDs, for example `ADMINS="12345,67890"` or `ADMINS="12345 67890"`. In production (`APP_ENV=production`) this variable must be populated; otherwise, diagnostic commands that expose database status will be disabled.
 
 ## Running
 
@@ -55,9 +54,9 @@ Timeweb builds the image using the repo's Dockerfile and runs migrations automat
 ### Продакшн
 
 - Если `ADMINS` пуст — диагностические команды отключены (fail-closed).
-- Если `ADMINS` заполнен — доступны только админ-команды `/whoami`, `/dbinfo`, `/health`.
+- Если `ADMINS` заполнен — подключается роутер с публичной `/whoami` и админскими `/dbinfo`, `/health`.
 
 ### Дев
 
-- По умолчанию подключается админ-диагностика.
-- Чтобы включить старые публичные `/dbinfo` и `/health`, задайте `ENABLE_PUBLIC_DIAGNOSTICS=1`. При этом админ-диагностика не подключается, чтобы избежать дублирования команд.
+- Диагностический роутер подключается всегда.
+- Команды `/dbinfo` и `/health` доступны только администраторам, а `/whoami` остаётся публичной.
