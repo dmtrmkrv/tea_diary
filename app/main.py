@@ -879,11 +879,16 @@ async def finalize_save(target_message: Message, state: FSMContext):
     await state.clear()
 
     text_card = build_card_text(t, infusions_data, photo_count=len(photo_entries))
-    photo_ids_to_send = [
-        entry.get("telegram_file_id")
-        for entry in photo_entries
-        if entry.get("telegram_file_id")
-    ]
+    photo_ids_to_send: List[str] = []
+    for entry in photo_entries:
+        if isinstance(entry, dict):
+            telegram_file_id = entry.get("telegram_file_id")
+            if telegram_file_id:
+                photo_ids_to_send.append(telegram_file_id)
+            continue
+
+        if isinstance(entry, str) and entry:
+            photo_ids_to_send.append(entry)
     await send_card_with_media(
         target_message,
         t.id,
