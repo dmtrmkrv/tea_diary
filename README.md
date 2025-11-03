@@ -29,11 +29,7 @@ In the Timeweb logs you should see Alembic migrations running, then `[DB] OK`, a
 
 ## Timeweb Cloud deployment
 
-- **Start command**
-
-  ```
-  bash -lc "cd /app && python -m alembic -c alembic.ini upgrade head && python -m app.main"
-  ```
+Timeweb builds the image using the repo's Dockerfile and runs migrations automatically through `entrypoint.sh`, so container logs show the Alembic upgrade (`Running upgrade ... -> head`), `[DB] OK`, and then the bot startup without needing to configure a manual start command.
 
 - **Environment variables**
 
