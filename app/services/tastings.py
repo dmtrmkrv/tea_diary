@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.db.engine import SessionLocal
@@ -14,13 +14,17 @@ _MAX_CREATE_ATTEMPTS = 2
 
 
 def _next_seq_for_user(session, user_id: int) -> int:
-    stmt = select(func.coalesce(func.max(Tasting.seq_no), 0) + 1).where(
-        Tasting.user_id == user_id
+    stmt = (
+        select(Tasting.seq_no)
+        .where(Tasting.user_id == user_id)
+        .order_by(Tasting.seq_no.desc())
+        .limit(1)
     )
     bind = session.bind
     if bind is not None and bind.dialect.name != "sqlite":
         stmt = stmt.with_for_update()
-    return session.execute(stmt).scalar_one()
+    last_seq = session.execute(stmt).scalar_one_or_none()
+    return (last_seq or 0) + 1
 
 
 def create_tasting(
