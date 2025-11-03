@@ -5,7 +5,19 @@ from dotenv import load_dotenv
 from sqlalchemy.engine import URL
 
 
-load_dotenv()
+def _truthy(v: str | None) -> bool:
+    return (v or "").lower() in {"1", "true", "t", "yes", "y"}
+
+
+# Грузим .env только в дев-режиме:
+# - если APP_ENV отсутствует ИЛИ не "production"
+# - и не выставлен явный запрет PYTHON_DOTENV_DISABLED=1
+APP_ENV = os.getenv("APP_ENV")
+if (APP_ENV is None or APP_ENV.lower() != "production") and not _truthy(
+    os.getenv("PYTHON_DOTENV_DISABLED")
+):
+    # override=False — не перезатираем уже заданные переменные окружения
+    load_dotenv(override=False)
 
 
 def get_bot_token() -> str:
