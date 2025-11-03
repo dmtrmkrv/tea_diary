@@ -23,10 +23,12 @@ from sqlalchemy import func, select
 
 from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
-from app.db.models import Infusion, Photo, Tasting, User
+from app.db.models import Infusion, Photo, Tasting
 from app.handlers import health as public_diag
 from app.routers import diagnostics as diag
 from app.utils.admins import get_admin_ids
+from app.services.tastings import create_tasting
+from app.services.users import get_or_create_user, set_user_timezone
 # fmt: on
 
 # ---------------- ЛОГИ ----------------
@@ -51,35 +53,6 @@ else:
 
 
 # ---------------- ЧАСОВОЙ ПОЯС ----------------
-
-def get_or_create_user(uid: int) -> User:
-    with SessionLocal() as s:
-        u = s.get(User, uid)
-        if not u:
-            u = User(
-                id=uid,
-                created_at=datetime.datetime.utcnow(),
-                tz_offset_min=0,
-            )
-            s.add(u)
-            s.commit()
-            s.refresh(u)
-        return u
-
-
-def set_user_tz(uid: int, offset_min: int) -> None:
-    with SessionLocal() as s:
-        u = s.get(User, uid)
-        if not u:
-            u = User(
-                id=uid,
-                created_at=datetime.datetime.utcnow(),
-                tz_offset_min=offset_min,
-            )
-            s.add(u)
-        else:
-            u.tz_offset_min = offset_min
-        s.commit()
 
 
 def get_user_now_hm(uid: int) -> str:
@@ -831,58 +804,30 @@ async def finalize_save(target_message: Message, state: FSMContext):
     data = await state.get_data()
     await flush_user_albums(data.get("user_id"), state)
     data = await state.get_data()
-    t = Tasting(
-        user_id=data.get("user_id"),
-        name=data.get("name"),
-        year=data.get("year"),
-        region=data.get("region"),
-        category=data.get("category"),
-        grams=data.get("grams"),
-        temp_c=data.get("temp_c"),
-        tasted_at=data.get("tasted_at"),
-        gear=data.get("gear"),
-        aroma_dry=data.get("aroma_dry"),
-        aroma_warmed=data.get("aroma_warmed"),
-        aroma_after=data.get("aroma_after"),
-        effects_csv=",".join(data.get("effects", [])) or None,
-        scenarios_csv=",".join(data.get("scenarios", [])) or None,
-        rating=data.get("rating", 0),
-        summary=data.get("summary") or None,
-    )
+
+    tasting_data = {
+        "user_id": data.get("user_id"),
+        "name": data.get("name"),
+        "year": data.get("year"),
+        "region": data.get("region"),
+        "category": data.get("category"),
+        "grams": data.get("grams"),
+        "temp_c": data.get("temp_c"),
+        "tasted_at": data.get("tasted_at"),
+        "gear": data.get("gear"),
+        "aroma_dry": data.get("aroma_dry"),
+        "aroma_warmed": data.get("aroma_warmed"),
+        "aroma_after": data.get("aroma_after"),
+        "effects_csv": ",".join(data.get("effects", [])) or None,
+        "scenarios_csv": ",".join(data.get("scenarios", [])) or None,
+        "rating": data.get("rating", 0),
+        "summary": data.get("summary") or None,
+    }
 
     infusions_data = data.get("infusions", [])
     new_photos: List[str] = (data.get("new_photos", []) or [])[:MAX_PHOTOS]
 
-    with SessionLocal() as s:
-        max_seq = (
-            s.execute(
-                select(func.max(Tasting.seq_no)).where(Tasting.user_id == t.user_id)
-            ).scalar()
-            or 0
-        )
-        t.seq_no = max_seq + 1
-        s.add(t)
-        s.flush()
-
-        for inf in infusions_data:
-            s.add(
-                Infusion(
-                    tasting_id=t.id,
-                    n=inf["n"],
-                    seconds=inf["seconds"],
-                    liquor_color=inf["liquor_color"],
-                    taste=inf["taste"],
-                    special_notes=inf["special_notes"],
-                    body=inf["body"],
-                    aftertaste=inf["aftertaste"],
-                )
-            )
-
-        for fid in new_photos:
-            s.add(Photo(tasting_id=t.id, file_id=fid))
-
-        s.commit()
-        s.refresh(t)
+    t = create_tasting(tasting_data, infusions_data, new_photos)
 
     await state.clear()
 
@@ -1001,7 +946,6 @@ async def show_pics(call: CallbackQuery):
 # ---------------- СОЗДАНИЕ НОВОЙ ЗАПИСИ (опросник) ----------------
 
 async def start_new(state: FSMContext, uid: int):
-    await state.clear()
     await state.update_data(
         user_id=uid,
         infusions=[],
@@ -1012,20 +956,25 @@ async def start_new(state: FSMContext, uid: int):
         aroma_warmed_sel=[],
         cur_taste_sel=[],
         cur_aftertaste_sel=[],
+        new_photos=[],
     )
     await state.set_state(NewTasting.name)
 
 
 async def new_cmd(message: Message, state: FSMContext):
     uid = message.from_user.id
-    get_or_create_user(uid)  # создадим запись юзера (для таймзоны)
+    await state.clear()
+    await flush_user_albums(uid, state, process=False)
+    get_or_create_user(uid, message.from_user.username)
     await start_new(state, uid)
     await message.answer("🍵 Название чая?")
 
 
 async def new_cb(call: CallbackQuery, state: FSMContext):
     uid = call.from_user.id
-    get_or_create_user(uid)
+    await state.clear()
+    await flush_user_albums(uid, state, process=False)
+    get_or_create_user(uid, call.from_user.username)
     await start_new(state, uid)
     await ui(call, "🍵 Название чая?")
     await call.answer()
@@ -2973,6 +2922,7 @@ async def help_cmd(message: Message):
         "/menu — включить кнопки под вводом (сквозное меню)\n"
         "/hide — скрыть кнопки\n"
         "/reset — сброс и возврат в меню\n"
+        "/resetstate — сбросить состояние\n"
         "/cancel — сброс текущего действия\n"
         "/edit <id или #N> — редактировать запись\n"
         "/delete <id или #N> — удалить запись"
@@ -2989,6 +2939,12 @@ async def cancel_cmd(message: Message, state: FSMContext):
 
 async def reset_cmd(message: Message, state: FSMContext):
     await cancel_cmd(message, state)
+
+
+async def reset_state_cmd(message: Message, state: FSMContext):
+    await state.clear()
+    await flush_user_albums(message.from_user.id, state, process=False)
+    await message.answer("Сбросил состояние.")
 
 
 async def menu_cmd(message: Message):
@@ -3026,6 +2982,7 @@ async def help_cb(call: CallbackQuery):
         "/menu — включить кнопки под вводом (сквозное меню)\n"
         "/hide — скрыть кнопки\n"
         "/reset — сброс и возврат в меню\n"
+        "/resetstate — сбросить состояние\n"
         "/cancel — сброс текущего действия\n"
         "/edit <id или #N> — редактировать запись\n"
         "/delete <id или #N> — удалить запись",
@@ -3055,7 +3012,7 @@ async def tz_cmd(message: Message):
     uid = message.from_user.id
 
     if len(parts) == 1:
-        u = get_or_create_user(uid)
+        u = get_or_create_user(uid, message.from_user.username)
         hours_float = (u.tz_offset_min or 0) / 60.0
         sign = "+" if hours_float >= 0 else ""
         await message.answer(
@@ -3078,7 +3035,7 @@ async def tz_cmd(message: Message):
         return
 
     offset_min = int(round(hours_float * 60))
-    set_user_tz(uid, offset_min)
+    set_user_timezone(uid, offset_min)
     sign = "+" if hours_float >= 0 else ""
     await message.answer(
         f"Запомнил UTC{sign}{hours_float:g}. "
@@ -3099,6 +3056,7 @@ def setup_handlers(dp: Dispatcher):
     dp.message.register(help_cmd, Command("help"))
     dp.message.register(cancel_cmd, Command("cancel"))
     dp.message.register(reset_cmd, Command("reset"))
+    dp.message.register(reset_state_cmd, Command("resetstate"))
     dp.message.register(menu_cmd, Command("menu"))
     dp.message.register(hide_cmd, Command("hide"))
     dp.message.register(new_cmd, Command("new"))

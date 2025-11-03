@@ -8,7 +8,6 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    UniqueConstraint,
     desc,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -31,12 +30,13 @@ class User(Base):
         DateTime, default=datetime.datetime.utcnow, nullable=False
     )
     tz_offset_min: Mapped[int] = mapped_column(Integer, default=0)
+    username: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
 
 class Tasting(Base):
     __tablename__ = "tastings"
     __table_args__ = (
-        UniqueConstraint("user_id", "seq_no", name="uq_tastings_user_seq_no"),
+        Index("ux_tastings_user_seq", "user_id", "seq_no", unique=True),
         Index("ix_tastings_user_category", "user_id", "category"),
         Index("ix_tastings_user_year", "user_id", "year"),
         Index("ix_tastings_user_rating", "user_id", "rating"),
@@ -85,7 +85,7 @@ class Tasting(Base):
 
     rating: Mapped[int] = mapped_column(Integer, default=0)
     summary: Mapped[Optional[str]] = mapped_column(nullable=True)
-    seq_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    seq_no: Mapped[int] = mapped_column(Integer, nullable=False)
 
     infusions: Mapped[List["Infusion"]] = relationship(
         back_populates="tasting", cascade="all, delete-orphan"
