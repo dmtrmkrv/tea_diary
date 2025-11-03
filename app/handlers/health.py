@@ -8,7 +8,9 @@ from app.config import get_app_env, get_db_url, get_tz
 from app.db.engine import SessionLocal
 
 
-router = Router()
+# DEV-ONLY diagnostics. Не подключается в продакшне и по умолчанию в деве.
+# Включается только при ENABLE_PUBLIC_DIAGNOSTICS=1
+router = Router(name="public_diagnostics")
 
 
 @router.message(Command("health"))

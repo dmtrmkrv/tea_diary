@@ -2,6 +2,7 @@ import asyncio
 import base64
 import datetime
 import logging
+import os
 import time
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -23,14 +24,30 @@ from sqlalchemy import func, select
 from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
 from app.db.models import Infusion, Photo, Tasting, User
-from app.handlers.health import router as health_router
+from app.handlers import health as public_diag
 from app.routers import diagnostics as diag
+from app.utils.admins import get_admin_ids
 # fmt: on
 
 # ---------------- ЛОГИ ----------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+IS_PROD = os.getenv("APP_ENV") == "production"
+ENABLE_PUBLIC_DIAGNOSTICS = os.getenv("ENABLE_PUBLIC_DIAGNOSTICS", "0") == "1"
+ADMINS = get_admin_ids()
+
+if IS_PROD:
+    if ADMINS:
+        DIAGNOSTICS_MODE = "admin"
+    else:
+        DIAGNOSTICS_MODE = "disabled"
+else:
+    if ENABLE_PUBLIC_DIAGNOSTICS:
+        DIAGNOSTICS_MODE = "public"
+    else:
+        DIAGNOSTICS_MODE = "admin"
 
 
 # ---------------- ЧАСОВОЙ ПОЯС ----------------
@@ -3072,8 +3089,10 @@ async def tz_cmd(message: Message):
 # ---------------- РЕГИСТРАЦИЯ ХЭНДЛЕРОВ ----------------
 
 def setup_handlers(dp: Dispatcher):
-    dp.include_router(diag.router)
-    dp.include_router(health_router)
+    if DIAGNOSTICS_MODE == "admin":
+        dp.include_router(diag.router)
+    elif DIAGNOSTICS_MODE == "public":
+        dp.include_router(public_diag.router)
 
     # команды
     dp.message.register(on_start, CommandStart())
@@ -3204,9 +3223,14 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="tz", description="Часовой пояс"),
         BotCommand(command="reset", description="Сброс и меню"),
         BotCommand(command="help", description="Помощь"),
-        BotCommand(command="health", description="Проверка БД"),
-        BotCommand(command="dbinfo", description="Сведения о БД"),
     ]
+    if DIAGNOSTICS_MODE != "disabled":
+        commands.extend(
+            [
+                BotCommand(command="health", description="Проверка БД"),
+                BotCommand(command="dbinfo", description="Сведения о БД"),
+            ]
+        )
     await bot.set_my_commands(commands)
 
 

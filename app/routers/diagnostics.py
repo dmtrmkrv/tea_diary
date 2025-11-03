@@ -11,10 +11,13 @@ from app.utils.admins import get_admin_ids
 router = Router(name="diagnostics")
 _admins = get_admin_ids()
 IS_PROD = os.getenv("APP_ENV") == "production"
-_allow_admin_commands = not (IS_PROD and not _admins)
 
+if not (IS_PROD and not _admins):
 
-if _allow_admin_commands:
+    @router.message(Command("whoami"))
+    async def whoami(message: types.Message):
+        uid = int(message.from_user.id)
+        await message.answer(f"you_id={uid}\nis_admin={uid in _admins}")
 
     @router.message(Command("dbinfo"), AdminOnly(_admins))
     async def dbinfo(message: types.Message):
@@ -32,11 +35,3 @@ if _allow_admin_commands:
             db = connection.execute(text("select current_database()")).scalar()
             cnt = connection.execute(text("select count(*) from tastings")).scalar()
         await message.answer(f"db={db}\ncount(tastings)={cnt}")
-else:
-    router.handlers.clear()
-
-
-@router.message(Command("whoami"))
-async def whoami(message: types.Message):
-    uid = int(message.from_user.id)
-    await message.answer(f"you_id={uid}\nis_admin={uid in _admins}")
