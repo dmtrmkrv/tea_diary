@@ -1,9 +1,9 @@
 import logging
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Union
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.engine import Engine, URL, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 
@@ -19,9 +19,9 @@ SessionLocal = sessionmaker(
 )
 
 
-def create_sa_engine(db_url_str) -> Engine:
+def create_sa_engine(db_url: Union[URL, str]) -> Engine:
     global engine
-    url = make_url(str(db_url_str))
+    url = make_url(db_url)
     kwargs = {"pool_pre_ping": True, "future": True}
     if url.drivername.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False}

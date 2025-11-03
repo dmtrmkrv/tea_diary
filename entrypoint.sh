@@ -14,11 +14,12 @@ fi
 echo "[ENTRYPOINT] ENV user=${POSTGRESQL_USER:-} host=${POSTGRESQL_HOST:-} db=${POSTGRESQL_DBNAME:-} sslmode=${POSTGRESQL_SSLMODE:-}"
 python - <<'PY'
 from app.config import get_db_url
-from sqlalchemy.engine import make_url
 
-u = make_url(str(get_db_url()))
-pw = u.password or ""
-safe = str(u).replace(pw, "***") if pw else str(u)
+url = get_db_url()
+try:
+    safe = url.render_as_string(hide_password=True)
+except AttributeError:
+    safe = str(url)
 print("[ENTRYPOINT] DSN:", safe)
 PY
 

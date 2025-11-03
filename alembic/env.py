@@ -1,9 +1,10 @@
 from logging.config import fileConfig
 import os
+from typing import Union
 
 from alembic import context
 from sqlalchemy import create_engine
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL
 
 from app.config import get_db_url
 from app.db.models import Base
@@ -16,15 +17,20 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def _log_connection_info() -> str:
-    url = str(get_db_url())
+def _render_safe_dsn(url: Union[URL, str]) -> str:
+    try:
+        return url.render_as_string(hide_password=True)
+    except AttributeError:
+        return str(url)
+
+
+def _log_connection_info() -> Union[URL, str]:
+    url = get_db_url()
     user = os.getenv("POSTGRESQL_USER", "")
     host = os.getenv("POSTGRESQL_HOST", "")
     dbname = os.getenv("POSTGRESQL_DBNAME", "")
     print(f"[Alembic] ENV user={user} host={host} db={dbname}")
-    parsed = make_url(url)
-    password = parsed.password or ""
-    safe_url = url.replace(password, "***") if password else url
+    safe_url = _render_safe_dsn(url)
     print(f"[Alembic] DSN: {safe_url}")
     return url
 

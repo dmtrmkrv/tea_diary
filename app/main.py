@@ -19,7 +19,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 
 from sqlalchemy import func, select
-from sqlalchemy.engine import make_url
 
 from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
@@ -3213,9 +3212,10 @@ async def set_bot_commands(bot: Bot):
 
 async def main():
     db_url = get_db_url()
-    u = make_url(str(db_url))
-    pw = u.password or ""
-    safe = str(db_url).replace(pw, "***") if pw else str(db_url)
+    try:
+        safe = db_url.render_as_string(hide_password=True)
+    except AttributeError:
+        safe = str(db_url)
     print(f"[DB] Using: {safe}")
     engine = create_sa_engine(db_url)
     startup_ping(engine)
