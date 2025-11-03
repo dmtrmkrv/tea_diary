@@ -5,7 +5,11 @@ from dotenv import load_dotenv
 from sqlalchemy.engine import URL
 
 
-load_dotenv()
+# грузим .env только вне продакшена (локалка)
+if os.getenv("APP_ENV", "production") != "production" and not os.getenv(
+    "PYTHON_DOTENV_DISABLED"
+):
+    load_dotenv()
 
 
 def get_bot_token() -> str:
