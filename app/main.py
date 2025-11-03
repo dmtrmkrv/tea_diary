@@ -24,6 +24,7 @@ from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
 from app.db.models import Infusion, Photo, Tasting, User
 from app.handlers.health import router as health_router
+from app.routers import diagnostics as diag
 # fmt: on
 
 # ---------------- ЛОГИ ----------------
@@ -3071,6 +3072,7 @@ async def tz_cmd(message: Message):
 # ---------------- РЕГИСТРАЦИЯ ХЭНДЛЕРОВ ----------------
 
 def setup_handlers(dp: Dispatcher):
+    dp.include_router(diag.router)
     dp.include_router(health_router)
 
     # команды

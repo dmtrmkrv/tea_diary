@@ -13,8 +13,11 @@ Configure the following variables (see `.env.example`) when deploying to Timeweb
 - `POSTGRESQL_USER`
 - `POSTGRESQL_PASSWORD`
 - `POSTGRESQL_SSLMODE`
+- `ADMINS`
 
 Locally, the bot falls back to `sqlite:////app/tastings.db` if the full PostgreSQL configuration is not provided.
+
+Set `ADMINS` to a comma-, space-, or semicolon-separated list of Telegram user IDs, for example `ADMINS="12345,67890"` or `ADMINS="12345 67890"`. In production (`APP_ENV=production`) this variable must be populated; otherwise, diagnostic commands that expose database status will be disabled.
 
 ## Running
 
@@ -42,12 +45,14 @@ Timeweb builds the image using the repo's Dockerfile and runs migrations automat
   POSTGRESQL_PASSWORD=...
   POSTGRESQL_SSLMODE=disable
   APP_ENV=production
+  ADMINS=12345,67890
   TZ=Europe/Amsterdam
   ```
 
 ## Diagnostics
 
-The bot exposes two helper commands:
+The bot exposes diagnostic commands for administrators:
 
-- `/health` — database connectivity check (`DB: OK` or failure details).
-- `/dbinfo` — shows driver type, database/host (or file), SSL mode, `APP_ENV`, and `TZ` values without revealing secrets.
+- `/whoami` — reports the sender's ID and whether they are in the admin list.
+- `/health` — database connectivity check (`DB: OK` or failure details). Requires admin privileges and is registered only when `ADMINS` is set.
+- `/dbinfo` — shows driver type, database/host (or file), SSL mode, `APP_ENV`, and `TZ` values without revealing secrets. Requires admin privileges and is registered only when `ADMINS` is set.
