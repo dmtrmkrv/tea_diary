@@ -27,6 +27,28 @@ python -m app.main
 
 In the Timeweb logs you should see Alembic migrations running, then `[DB] OK`, and finally `Start polling` once the bot is ready to accept updates.
 
+## Timeweb Cloud deployment
+
+- **Start command**
+
+  ```
+  bash -lc "cd /app && python -m alembic -c alembic.ini upgrade head && python -m app.main"
+  ```
+
+- **Environment variables**
+
+  ```
+  BOT_TOKEN=...
+  POSTGRESQL_HOST=10.20.0.4
+  POSTGRESQL_PORT=5432
+  POSTGRESQL_DBNAME=default_db
+  POSTGRESQL_USER=gen_user
+  POSTGRESQL_PASSWORD=...
+  POSTGRESQL_SSLMODE=disable
+  APP_ENV=production
+  TZ=Europe/Amsterdam
+  ```
+
 ## Diagnostics
 
 The bot exposes two helper commands:
