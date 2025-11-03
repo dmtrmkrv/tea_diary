@@ -8,6 +8,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     desc,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -128,9 +129,20 @@ class Infusion(Base):
 
 class Photo(Base):
     __tablename__ = "photos"
+    __table_args__ = (Index("ix_photos_object_key", "object_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tasting_id: Mapped[int] = mapped_column(
         ForeignKey("tastings.id", ondelete="CASCADE")
     )
     file_id: Mapped[str] = mapped_column(String(255))
+    storage_backend: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="local", server_default="local"
+    )
+    object_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    telegram_file_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    telegram_file_unique_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )

@@ -1,17 +1,18 @@
 import asyncio
 import base64
 import datetime
+import io
 import logging
 import os
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, TypedDict, Union
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, CallbackQuery, BotCommand,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, FSInputFile,
-    InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton,
+    BufferedInputFile, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
     # fmt: off
@@ -143,6 +144,13 @@ ALBUM_TIMEOUT = 2.0
 ALBUM_BUFFER: Dict[Tuple[int, str], dict] = {}
 MORE_THROTTLE: Dict[int, float] = {}
 MORE_THROTTLE_INTERVAL = 1.0
+
+
+class PhotoDraft(TypedDict):
+    body: bytes
+    filename_hint: str
+    telegram_file_id: str
+    telegram_file_unique_id: str
 
 
 # ---------------- КЛАВИАТУРЫ ----------------
@@ -682,6 +690,57 @@ async def send_card_with_media(
                 )
 
 
+async def _store_photo_from_file_id(
+    message: Message,
+    state: FSMContext,
+    file_id: str,
+    photos: List[PhotoDraft],
+) -> bool:
+    try:
+        tg_file = await message.bot.get_file(file_id)
+    except Exception:
+        logger.exception("Failed to get Telegram file %s", file_id)
+        await message.answer("Не удалось получить файл из Telegram. Попробуйте ещё раз.")
+        return False
+
+    file_path = getattr(tg_file, "file_path", None) or ""
+    filename_hint = os.path.basename(file_path) or "photo.jpg"
+
+    buffer = io.BytesIO()
+    try:
+        await message.bot.download_file(file_path, buffer)
+    except Exception:
+        logger.exception("Failed to download Telegram file %s", file_id)
+        await message.answer("Не удалось скачать фото. Попробуйте ещё раз.")
+        return False
+
+    body = buffer.getvalue()
+
+    try:
+        sent = await message.answer_photo(
+            BufferedInputFile(body, filename=filename_hint)
+        )
+    except Exception:
+        logger.exception("Failed to re-send photo for storage")
+        await message.answer("Не удалось отправить фото. Попробуйте ещё раз.")
+        return False
+
+    if not sent.photo:
+        return False
+
+    saved = sent.photo[-1]
+    photos.append(
+        {
+            "body": body,
+            "filename_hint": filename_hint,
+            "telegram_file_id": saved.file_id,
+            "telegram_file_unique_id": saved.file_unique_id,
+        }
+    )
+    await state.update_data(new_photos=photos)
+    return True
+
+
 async def _process_album_entry(entry: dict) -> None:
     state: Optional[FSMContext] = entry.get("state")
     message: Optional[Message] = entry.get("message")
@@ -692,13 +751,8 @@ async def _process_album_entry(entry: dict) -> None:
         data = await state.get_data()
     except Exception:
         return
-    photos: List[str] = data.get("new_photos", []) or []
+    photos: List[PhotoDraft] = list(data.get("new_photos", []) or [])
     capacity = MAX_PHOTOS - len(photos)
-    accepted: List[str] = file_ids[: capacity if capacity > 0 else 0]
-    extra = len(file_ids) - len(accepted)
-    if accepted:
-        photos.extend(accepted)
-        await state.update_data(new_photos=photos)
     if capacity <= 0:
         await message.answer(
             f"Можно добавить максимум {MAX_PHOTOS} фото, лишние я не сохранил."
@@ -707,14 +761,17 @@ async def _process_album_entry(entry: dict) -> None:
             f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
         )
         return
-    if not accepted:
-        await message.answer(
-            f"Можно добавить максимум {MAX_PHOTOS} фото, лишние я не сохранил."
-        )
-        await message.answer(
-            f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
-        )
+
+    accepted: List[str] = file_ids[:capacity]
+    extra = len(file_ids) - len(accepted)
+    saved_any = False
+    for fid in accepted:
+        if await _store_photo_from_file_id(message, state, fid, photos):
+            saved_any = True
+
+    if not saved_any:
         return
+
     if extra > 0:
         await message.answer(
             f"Из-за лимита {MAX_PHOTOS} фото сохранил только часть альбома."
@@ -813,18 +870,25 @@ async def finalize_save(target_message: Message, state: FSMContext):
     }
 
     infusions_data = data.get("infusions", [])
-    new_photos: List[str] = (data.get("new_photos", []) or [])[:MAX_PHOTOS]
+    photo_entries: List[PhotoDraft] = (
+        list(data.get("new_photos", []) or [])[:MAX_PHOTOS]
+    )
 
-    t = create_tasting(tasting_data, infusions_data, new_photos)
+    t = create_tasting(tasting_data, infusions_data, photo_entries)
 
     await state.clear()
 
-    text_card = build_card_text(t, infusions_data, photo_count=len(new_photos))
+    text_card = build_card_text(t, infusions_data, photo_count=len(photo_entries))
+    photo_ids_to_send = [
+        entry.get("telegram_file_id")
+        for entry in photo_entries
+        if entry.get("telegram_file_id")
+    ]
     await send_card_with_media(
         target_message,
         t.id,
         text_card,
-        new_photos,
+        photo_ids_to_send,
         reply_markup=card_actions_kb(t.id).as_markup(),
     )
 
@@ -852,7 +916,7 @@ async def prompt_photos(target: Union[Message, CallbackQuery], state: FSMContext
 
 async def photo_add(message: Message, state: FSMContext):
     data = await state.get_data()
-    photos: List[str] = data.get("new_photos", []) or []
+    photos: List[PhotoDraft] = list(data.get("new_photos", []) or [])
     if not message.photo:
         await message.answer(
             "Пришли фото (или жми «Готово» / «Пропустить»)."
@@ -882,11 +946,10 @@ async def photo_add(message: Message, state: FSMContext):
             task.cancel()
         entry["task"] = asyncio.create_task(_album_timeout_handler(key))
     else:
-        photos.append(fid)
-        await state.update_data(new_photos=photos)
-        await message.answer(
-            f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
-        )
+        if await _store_photo_from_file_id(message, state, fid, photos):
+            await message.answer(
+                f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
+            )
 
 
 async def photos_done(call: CallbackQuery, state: FSMContext):
@@ -915,7 +978,11 @@ async def show_pics(call: CallbackQuery):
             await ui(call, "Фото не найдены.")
             await call.answer()
             return
-        pics = [p.file_id for p in (t.photos or [])]
+        pics = [
+            (p.telegram_file_id or p.file_id)
+            for p in (t.photos or [])
+            if (p.telegram_file_id or p.file_id)
+        ]
 
     if not pics:
         await ui(call, "Фото нет.")
@@ -2340,7 +2407,7 @@ async def open_card(call: CallbackQuery):
         )
         photo_ids = (
             s.execute(
-                select(Photo.file_id)
+                select(func.coalesce(Photo.telegram_file_id, Photo.file_id))
                 .where(Photo.tasting_id == tid)
                 .order_by(Photo.id.asc())
                 .limit(MAX_PHOTOS)

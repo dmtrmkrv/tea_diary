@@ -3,8 +3,9 @@ from aiogram.filters import Command
 from aiogram.filters.state import StateFilter
 from sqlalchemy import create_engine, text
 
-from app.config import get_db_url
+from app.config import get_db_url, get_media_backend, get_s3_config
 from app.filters.admin_only import AdminOnly
+from app.services.storage import _s3_client
 
 def create_router(admin_ids: set[int], is_prod: bool) -> Router:
     """Создаёт и настраивает диагностический роутер."""
@@ -33,6 +34,14 @@ def create_router(admin_ids: set[int], is_prod: bool) -> Router:
         with engine.connect() as connection:
             db = connection.execute(text("select current_database()")).scalar()
             cnt = connection.execute(text("select count(*) from tastings")).scalar()
-        await message.answer(f"db={db}\\ncount(tastings)={cnt}")
+        s3_status = "disabled"
+        if get_media_backend() == "s3":
+            cfg = get_s3_config()
+            try:
+                _s3_client().list_objects_v2(Bucket=cfg.bucket, MaxKeys=1)
+                s3_status = "ok"
+            except Exception as exc:
+                s3_status = f"error:{type(exc).__name__}"
+        await message.answer(f"db={db}\\ncount(tastings)={cnt}\\ns3={s3_status}")
 
     return router

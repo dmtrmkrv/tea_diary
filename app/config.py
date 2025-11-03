@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from typing import Union
 
 from dotenv import load_dotenv
@@ -58,3 +59,29 @@ def get_app_env() -> str:
 
 def get_tz() -> str:
     return os.getenv("TZ", "Europe/Amsterdam")
+
+
+def get_media_backend() -> str:
+    return os.getenv("MEDIA_BACKEND", "local").lower()
+
+
+@dataclass
+class S3Config:
+    enabled: bool
+    endpoint: str | None
+    region: str | None
+    bucket: str | None
+    access_key: str | None
+    secret_key: str | None
+
+
+def get_s3_config() -> S3Config:
+    backend = get_media_backend() == "s3"
+    return S3Config(
+        enabled=backend,
+        endpoint=os.getenv("S3_ENDPOINT_URL"),
+        region=os.getenv("S3_REGION"),
+        bucket=os.getenv("S3_BUCKET"),
+        access_key=os.getenv("S3_ACCESS_KEY"),
+        secret_key=os.getenv("S3_SECRET_KEY"),
+    )
