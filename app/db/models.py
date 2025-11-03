@@ -2,6 +2,7 @@ import datetime
 from typing import List, Optional
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     ForeignKey,
     Index,
@@ -25,7 +26,7 @@ class User(Base):
 
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # telegram user_id
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # telegram user_id
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=datetime.datetime.utcnow, nullable=False
     )
@@ -48,7 +49,12 @@ class Tasting(Base):
     )
 
     # кто создал запись
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     name: Mapped[str] = mapped_column(String(200))
     year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
