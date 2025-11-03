@@ -1,5 +1,6 @@
 from aiogram import Router, types
 from aiogram.filters import Command
+from aiogram.filters.state import StateFilter
 from sqlalchemy import create_engine, text
 
 from app.config import get_db_url
@@ -12,12 +13,12 @@ def create_router(admin_ids: set[int], is_prod: bool) -> Router:
     if is_prod and not admin_ids:
         return router
 
-    @router.message(Command("whoami"))
+    @router.message(StateFilter("*"), Command("whoami"))
     async def whoami(message: types.Message):
         uid = int(message.from_user.id) if message.from_user else 0
         await message.answer(f"you_id={uid}\\nis_admin={uid in admin_ids}")
 
-    @router.message(Command("dbinfo"), AdminOnly(admin_ids))
+    @router.message(StateFilter("*"), AdminOnly(admin_ids), Command("dbinfo"))
     async def dbinfo(message: types.Message):
         url = get_db_url()
         try:
@@ -26,7 +27,7 @@ def create_router(admin_ids: set[int], is_prod: bool) -> Router:
             safe = str(url)
         await message.answer(f"DB URL: {safe}")
 
-    @router.message(Command("health"), AdminOnly(admin_ids))
+    @router.message(StateFilter("*"), AdminOnly(admin_ids), Command("health"))
     async def health(message: types.Message):
         engine = create_engine(get_db_url(), future=True)
         with engine.connect() as connection:
