@@ -7,7 +7,8 @@ import logging
 import os
 import time
 from contextlib import suppress
-from typing import Dict, List, Optional, Tuple, TypedDict, Union
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple, TypedDict, Union
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, StateFilter
@@ -20,7 +21,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
     # fmt: off
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import SkipHandler, TelegramBadRequest
 
 from sqlalchemy import func, select
 
@@ -28,9 +29,11 @@ from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
 from app.db.models import Infusion, Photo, Tasting, User
 from app.routers.diagnostics import create_router
+from app.ui.keyboards import make_infusions_kb, make_numpad
 from app.utils.admins import get_admin_ids
 from app.services.tastings import create_tasting
 from app.services.users import get_or_create_user, set_user_timezone
+from app.validators import parse_float, parse_infusions_list, parse_int
 # fmt: on
 
 # ---------------- ЛОГИ ----------------
@@ -85,6 +88,18 @@ def resolve_tasting(uid: int, identifier: str) -> Optional[Tasting]:
 
 CATEGORIES = ["Зелёный", "Белый", "Красный", "Улун", "Шу Пуэр", "Шен Пуэр", "Хэй Ча", "Другое"]
 BODY_PRESETS = ["тонкое", "лёгкое", "среднее", "плотное", "маслянистое"]
+
+YEAR_MIN = 1900
+GRAMS_ERROR = "Граммовка от 0.1 до 50 г (можно 3.5)"
+TEMP_ERROR = "Температура от 40 до 100 °C"
+INFUSIONS_ERROR = "Проверь формат: секунды 1–600, например: 10 15 20"
+
+NUMPAD_DIGITS = {str(i) for i in range(10)}
+NUMPAD_CLEAR = "Очистить"
+NUMPAD_DONE = "Готово"
+NUMPAD_SKIP = "Пропустить"
+NUMPAD_ADJUST_LABELS = {"−10", "−1", "+1", "+10", "−5", "+5"}
+NUMPAD_ADJUST_ALIASES = NUMPAD_ADJUST_LABELS | {"-10", "-1", "-5"}
 
 EFFECTS = [
     "Тепло",
@@ -481,6 +496,364 @@ async def ui(target: Union[CallbackQuery, Message], text: str, reply_markup=None
             await target.message.answer(text, reply_markup=reply_markup)
         else:
             await target.answer(text, reply_markup=reply_markup)
+
+
+async def remove_reply_keyboard(message: Message) -> None:
+    removal = await message.answer("\u200b", reply_markup=ReplyKeyboardRemove())
+    with suppress(TelegramBadRequest):
+        await removal.delete()
+
+
+@dataclass
+class NumpadFieldConfig:
+    state_name: str
+    buffer_key: str
+    value_key: str
+    min_value: float
+    max_value: float
+    deltas: List[int]
+    formatter: Callable[[Union[int, float]], str]
+    parser: Callable[[str], Union[int, float]]
+    ready: Callable[[Message, FSMContext, Union[int, float]], Awaitable[None]]
+    skip: Callable[[Message, FSMContext], Awaitable[None]]
+    placeholder: Optional[str] = None
+    unit: str = ""
+    decimals: Optional[int] = None
+    include_mid_steps: bool = False
+
+
+NUMPAD_CONFIGS: Dict[str, NumpadFieldConfig] = {}
+
+
+def format_numpad_value(value: Union[int, float], decimals: Optional[int]) -> str:
+    if decimals and decimals > 0:
+        text = f"{float(value):.{decimals}f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
+    return str(int(value))
+
+
+def get_year_max_value() -> int:
+    return datetime.datetime.utcnow().year + 1
+
+
+def parse_year_value(raw: str) -> int:
+    max_year = get_year_max_value()
+    error_message = f"Укажи год числом от {YEAR_MIN} до {max_year}"
+    return parse_int(raw, min_value=YEAR_MIN, max_value=max_year, error_message=error_message)
+
+
+def parse_temp_value(raw: str) -> int:
+    return parse_int(raw, min_value=40, max_value=100, error_message=TEMP_ERROR)
+
+
+def parse_grams_value(raw: str) -> float:
+    return parse_float(
+        raw,
+        min_value=0.1,
+        max_value=50.0,
+        error_message=GRAMS_ERROR,
+        precision=1,
+    )
+
+
+async def send_numpad_prompt(
+    target: Union[Message, CallbackQuery],
+    state: FSMContext,
+    config: NumpadFieldConfig,
+    text: str,
+) -> None:
+    data = await state.get_data()
+    buffer = data.get(config.buffer_key)
+    if buffer is None:
+        value = data.get(config.value_key)
+        if value is not None:
+            buffer = config.formatter(value)
+        else:
+            buffer = ""
+    await state.update_data({config.buffer_key: buffer})
+
+    display_suffix = ""
+    if buffer:
+        unit = config.unit or ""
+        display_value = f"{buffer}{unit}" if unit else buffer
+        display_suffix = f"\nСейчас: {display_value}"
+
+    markup = make_numpad(
+        include_mid_steps=config.include_mid_steps,
+        placeholder=config.placeholder,
+    )
+
+    text_to_send = text + display_suffix
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(text_to_send, reply_markup=markup)
+    else:
+        await target.answer(text_to_send, reply_markup=markup)
+
+
+async def ask_year_prompt(message: Message, state: FSMContext) -> None:
+    config = NUMPAD_CONFIGS.get(NewTasting.year.state)
+    if not config:
+        return
+    await send_numpad_prompt(message, state, config, "📅 Год сбора? Можно пропустить.")
+    await state.set_state(NewTasting.year)
+
+
+async def ask_grams_prompt(message: Message, state: FSMContext) -> None:
+    config = NUMPAD_CONFIGS.get(NewTasting.grams.state)
+    if not config:
+        return
+    await send_numpad_prompt(message, state, config, "⚖️ Граммовка? Можно пропустить.")
+    await state.set_state(NewTasting.grams)
+
+
+async def ask_temp_prompt(message: Message, state: FSMContext) -> None:
+    config = NUMPAD_CONFIGS.get(NewTasting.temp_c.state)
+    if not config:
+        return
+    await send_numpad_prompt(message, state, config, "🌡️ Температура, °C? Можно пропустить.")
+    await state.set_state(NewTasting.temp_c)
+
+
+async def ask_tasted_at_prompt(
+    target: Union[Message, CallbackQuery], state: FSMContext, uid: int
+) -> None:
+    now_hm = get_user_now_hm(uid)
+    text = (
+        f"⏰ Время дегустации? Сейчас {now_hm}. "
+        "Введи ЧЧ:ММ, нажми «🕒 Текущее время» или пропусти."
+    )
+    markup = time_kb().as_markup()
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
+    await state.set_state(NewTasting.tasted_at)
+
+
+async def finalize_year_input(message: Message, state: FSMContext, value: int) -> None:
+    formatted = format_numpad_value(value, decimals=0)
+    await state.update_data(year=value, year_input=formatted)
+    await remove_reply_keyboard(message)
+    await message.answer(
+        "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
+    )
+    await state.set_state(NewTasting.region)
+
+
+async def skip_year_value(message: Message, state: FSMContext) -> None:
+    await state.update_data(year=None, year_input="")
+    await remove_reply_keyboard(message)
+    await message.answer(
+        "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
+    )
+    await state.set_state(NewTasting.region)
+
+
+async def finalize_grams_input(message: Message, state: FSMContext, value: float) -> None:
+    formatted = format_numpad_value(value, decimals=1)
+    await state.update_data(grams=value, grams_input=formatted)
+    await remove_reply_keyboard(message)
+    await ask_temp_prompt(message, state)
+
+
+async def skip_grams_value(message: Message, state: FSMContext) -> None:
+    await state.update_data(grams=None, grams_input="")
+    await remove_reply_keyboard(message)
+    await ask_temp_prompt(message, state)
+
+
+async def finalize_temp_input(message: Message, state: FSMContext, value: int) -> None:
+    formatted = format_numpad_value(value, decimals=0)
+    await state.update_data(temp_c=value, temp_input=formatted)
+    await remove_reply_keyboard(message)
+    await ask_tasted_at_prompt(message, state, message.from_user.id)
+
+
+async def skip_temp_value(
+    message: Message, state: FSMContext, uid: Optional[int] = None
+) -> None:
+    if uid is None:
+        uid = getattr(message.from_user, "id", None)
+    if uid is None:
+        data = await state.get_data()
+        uid = data.get("user_id")
+    await state.update_data(temp_c=None, temp_input="")
+    await remove_reply_keyboard(message)
+    if uid is not None:
+        await ask_tasted_at_prompt(message, state, uid)
+
+
+NUMPAD_CONFIGS.update(
+    {
+        NewTasting.year.state: NumpadFieldConfig(
+            state_name=NewTasting.year.state,
+            buffer_key="year_input",
+            value_key="year",
+            min_value=YEAR_MIN,
+            max_value=get_year_max_value(),
+            deltas=[-10, -1, 1, 10],
+            formatter=lambda v: format_numpad_value(v, decimals=0),
+            parser=parse_year_value,
+            ready=finalize_year_input,
+            skip=skip_year_value,
+            placeholder="год",
+            decimals=0,
+        ),
+        NewTasting.grams.state: NumpadFieldConfig(
+            state_name=NewTasting.grams.state,
+            buffer_key="grams_input",
+            value_key="grams",
+            min_value=0.1,
+            max_value=50.0,
+            deltas=[-10, -1, 1, 10],
+            formatter=lambda v: format_numpad_value(v, decimals=1),
+            parser=parse_grams_value,
+            ready=finalize_grams_input,
+            skip=skip_grams_value,
+            placeholder="граммы",
+            unit=" г",
+            decimals=1,
+        ),
+        NewTasting.temp_c.state: NumpadFieldConfig(
+            state_name=NewTasting.temp_c.state,
+            buffer_key="temp_input",
+            value_key="temp_c",
+            min_value=40,
+            max_value=100,
+            deltas=[-10, -5, -1, 1, 5, 10],
+            formatter=lambda v: format_numpad_value(v, decimals=0),
+            parser=parse_temp_value,
+            ready=finalize_temp_input,
+            skip=skip_temp_value,
+            placeholder="температура",
+            unit=" °C",
+            decimals=0,
+            include_mid_steps=True,
+        ),
+    }
+)
+
+
+async def get_numpad_config(state: FSMContext) -> Optional[NumpadFieldConfig]:
+    current_state = await state.get_state()
+    if not current_state:
+        return None
+    return NUMPAD_CONFIGS.get(current_state)
+
+
+async def numpad_digit(message: Message, state: FSMContext) -> None:
+    config = await get_numpad_config(state)
+    if not config:
+        raise SkipHandler()
+    digit = (message.text or "").strip()
+    if digit not in NUMPAD_DIGITS:
+        raise SkipHandler()
+
+    data = await state.get_data()
+    current = data.get(config.buffer_key) or ""
+    new_buffer = f"{current}{digit}"
+    await state.update_data({config.buffer_key: new_buffer})
+
+    unit = config.unit or ""
+    display = f"{new_buffer}{unit}" if unit and new_buffer else new_buffer
+    if display:
+        await message.answer(f"Сейчас: {display}")
+    else:
+        await message.answer("Пока пусто.")
+
+
+async def numpad_clear(message: Message, state: FSMContext) -> None:
+    config = await get_numpad_config(state)
+    if not config:
+        raise SkipHandler()
+    await state.update_data({config.buffer_key: "", config.value_key: None})
+    await message.answer("Сбросил. Введи значение заново.")
+
+
+async def numpad_adjust(message: Message, state: FSMContext) -> None:
+    config = await get_numpad_config(state)
+    if not config:
+        raise SkipHandler()
+
+    raw = (message.text or "").strip()
+    normalized = raw.replace("−", "-")
+    try:
+        delta = int(normalized)
+    except ValueError:
+        return
+
+    if delta not in config.deltas:
+        raise SkipHandler()
+
+    data = await state.get_data()
+    buffer = (data.get(config.buffer_key) or "").replace(",", ".")
+    current_value: Optional[float] = None
+    if buffer:
+        try:
+            current_value = float(buffer)
+        except ValueError:
+            current_value = None
+
+    if current_value is None:
+        stored_value = data.get(config.value_key)
+        if stored_value is not None:
+            current_value = float(stored_value)
+
+    if current_value is None:
+        current_value = config.min_value
+
+    new_value = current_value + delta
+    min_value = config.min_value
+    max_value = config.max_value
+    if config.state_name == NewTasting.year.state:
+        max_value = get_year_max_value()
+    new_value = max(min_value, min(max_value, new_value))
+
+    if config.decimals and config.decimals > 0:
+        typed_value: Union[int, float] = round(new_value, config.decimals)
+    else:
+        typed_value = int(round(new_value))
+
+    text_value = config.formatter(typed_value)
+    await state.update_data(
+        {
+            config.buffer_key: text_value,
+            config.value_key: typed_value,
+        }
+    )
+
+    unit = config.unit or ""
+    display = f"{text_value}{unit}" if unit and text_value else text_value
+    await message.answer(f"Сейчас: {display}")
+
+
+async def numpad_done(message: Message, state: FSMContext) -> None:
+    config = await get_numpad_config(state)
+    if not config:
+        raise SkipHandler()
+    data = await state.get_data()
+    raw = (data.get(config.buffer_key) or "").strip()
+    if not raw:
+        await message.answer("Пока пусто. Введи значение или нажми «Пропустить».")
+        return
+    try:
+        value = config.parser(raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await config.ready(message, state, value)
+
+
+async def numpad_skip(message: Message, state: FSMContext) -> None:
+    config = await get_numpad_config(state)
+    if not config:
+        raise SkipHandler()
+    if config.state_name == NewTasting.temp_c.state:
+        await config.skip(message, state, message.from_user.id)
+    else:
+        await config.skip(message, state)
 
 
 def short_row(t: Tasting) -> str:
@@ -1141,6 +1514,10 @@ async def start_new(state: FSMContext, uid: int):
         cur_taste_sel=[],
         cur_aftertaste_sel=[],
         new_photos=[],
+        pending_seconds=[],
+        year_input="",
+        grams_input="",
+        temp_input="",
     )
     await state.set_state(NewTasting.name)
 
@@ -1166,33 +1543,26 @@ async def new_cb(call: CallbackQuery, state: FSMContext):
 
 async def name_in(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
-    await message.answer(
-        "📅 Год сбора? Можно пропустить.",
-        reply_markup=skip_kb("year").as_markup(),
-    )
-    await state.set_state(NewTasting.year)
+    await ask_year_prompt(message, state)
 
 
 async def year_skip(call: CallbackQuery, state: FSMContext):
-    await state.update_data(year=None)
-    await ui(
-        call,
-        "🗺️ Регион? Можно пропустить.",
-        reply_markup=skip_kb("region").as_markup(),
-    )
-    await state.set_state(NewTasting.region)
+    await skip_year_value(call.message, state)
     await call.answer()
 
 
 async def year_in(message: Message, state: FSMContext):
-    txt = message.text.strip()
-    year = int(txt) if txt.isdigit() else None
-    await state.update_data(year=year)
-    await message.answer(
-        "🗺️ Регион? Можно пропустить.",
-        reply_markup=skip_kb("region").as_markup(),
-    )
-    await state.set_state(NewTasting.region)
+    cfg = NUMPAD_CONFIGS.get(NewTasting.year.state)
+    if not cfg:
+        return
+    raw = (message.text or "").strip()
+    await state.update_data(year_input=raw)
+    try:
+        value = cfg.parser(raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await cfg.ready(message, state, value)
 
 
 async def region_skip(call: CallbackQuery, state: FSMContext):
@@ -1220,7 +1590,6 @@ async def cat_pick(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(category=val)
     await ask_optional_grams_edit(call, state)
-    await call.answer()
 
 
 async def cat_custom_in(message: Message, state: FSMContext):
@@ -1234,76 +1603,50 @@ async def cat_custom_in(message: Message, state: FSMContext):
 
 
 async def ask_optional_grams_edit(call: CallbackQuery, state: FSMContext):
-    await ui(
-        call,
-        "⚖️ Граммовка? Можно пропустить.",
-        reply_markup=skip_kb("grams").as_markup(),
-    )
-    await state.set_state(NewTasting.grams)
+    await ask_grams_prompt(call.message, state)
+    await call.answer()
 
 
 async def ask_optional_grams_msg(message: Message, state: FSMContext):
-    await message.answer(
-        "⚖️ Граммовка? Можно пропустить.",
-        reply_markup=skip_kb("grams").as_markup(),
-    )
-    await state.set_state(NewTasting.grams)
+    await ask_grams_prompt(message, state)
 
 
 async def grams_skip(call: CallbackQuery, state: FSMContext):
-    await state.update_data(grams=None)
-    await ui(
-        call,
-        "🌡️ Температура, °C? Можно пропустить.",
-        reply_markup=skip_kb("temp").as_markup(),
-    )
-    await state.set_state(NewTasting.temp_c)
+    await skip_grams_value(call.message, state)
     await call.answer()
 
 
 async def grams_in(message: Message, state: FSMContext):
-    txt = message.text.replace(",", ".").strip()
+    cfg = NUMPAD_CONFIGS.get(NewTasting.grams.state)
+    if not cfg:
+        return
+    raw = (message.text or "").strip()
+    await state.update_data(grams_input=raw)
     try:
-        grams = float(txt)
-    except Exception:
-        grams = None
-    await state.update_data(grams=grams)
-    await message.answer(
-        "🌡️ Температура, °C? Можно пропустить.",
-        reply_markup=skip_kb("temp").as_markup(),
-    )
-    await state.set_state(NewTasting.temp_c)
+        value = cfg.parser(raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await cfg.ready(message, state, value)
 
 
 async def temp_skip(call: CallbackQuery, state: FSMContext):
-    await state.update_data(temp_c=None)
-    now_hm = get_user_now_hm(call.from_user.id)
-    await ui(
-        call,
-        f"⏰ Время дегустации? Сейчас {now_hm}. "
-        "Введи ЧЧ:ММ, нажми «🕒 Текущее время» или пропусти.",
-        reply_markup=time_kb().as_markup(),
-    )
-    await state.set_state(NewTasting.tasted_at)
-    await call.answer()
+    await skip_temp_value(call.message, state, call.from_user.id)
+    await call.answer("Пропущено")
 
 
 async def temp_in(message: Message, state: FSMContext):
-    txt = message.text.strip()
-    temp_val = None
+    cfg = NUMPAD_CONFIGS.get(NewTasting.temp_c.state)
+    if not cfg:
+        return
+    raw = (message.text or "").strip()
+    await state.update_data(temp_input=raw)
     try:
-        temp_val = int(float(txt))
-    except Exception:
-        temp_val = None
-    await state.update_data(temp_c=temp_val)
-
-    now_hm = get_user_now_hm(message.from_user.id)
-    await message.answer(
-        f"⏰ Время дегустации? Сейчас {now_hm}. "
-        "Введи ЧЧ:ММ, нажми «🕒 Текущее время» или пропусти.",
-        reply_markup=time_kb().as_markup(),
-    )
-    await state.set_state(NewTasting.tasted_at)
+        value = cfg.parser(raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await cfg.ready(message, state, value)
 
 
 async def time_now(call: CallbackQuery, state: FSMContext):
@@ -1475,30 +1818,145 @@ async def aroma_warmed_custom(message: Message, state: FSMContext):
 
 # --- проливы
 
-async def start_infusion_block_msg(message: Message, state: FSMContext):
+async def prompt_infusion_seconds(
+    target: Union[Message, CallbackQuery], state: FSMContext
+) -> None:
     data = await state.get_data()
     n = data.get("infusion_n", 1)
-    await message.answer(f"🫖 Пролив {n}. Время, сек?")
+    current = data.get("cur_seconds")
+    pending: List[int] = list(data.get("pending_seconds") or [])
+    if current is None and pending:
+        current = pending.pop(0)
+        await state.update_data(cur_seconds=current, pending_seconds=pending)
+
+    text = f"🫖 Пролив {n}. Время, сек?"
+    if current is not None:
+        text += f" (сейчас {current} сек)"
+
+    markup = make_infusions_kb()
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
     await state.set_state(InfusionState.seconds)
+
+
+async def start_infusion_block_msg(message: Message, state: FSMContext):
+    await prompt_infusion_seconds(message, state)
 
 
 async def start_infusion_block_call(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    n = data.get("infusion_n", 1)
-    await ui(call, f"🫖 Пролив {n}. Время, сек?")
-    await state.set_state(InfusionState.seconds)
+    await prompt_infusion_seconds(call, state)
     await call.answer()
 
 
 async def inf_seconds(message: Message, state: FSMContext):
-    txt = message.text.strip()
-    val = int(txt) if txt.isdigit() else None
-    await state.update_data(cur_seconds=val)
-    await message.answer(
-        "Цвет настоя пролива? Можно пропустить.",
-        reply_markup=skip_kb("color").as_markup(),
-    )
+    text = (message.text or "").strip()
+    try:
+        values = parse_infusions_list(text, error_message=INFUSIONS_ERROR)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+
+    data = await state.get_data()
+    existing = len(data.get("infusions", []))
+    total_requested = existing + len(values)
+    if total_requested > 30:
+        await message.answer(INFUSIONS_ERROR)
+        return
+
+    first = values[0]
+    rest = values[1:]
+    await state.update_data(cur_seconds=first, pending_seconds=rest)
+
+    if rest:
+        rest_text = ", ".join(str(item) for item in rest)
+        await message.answer(
+            f"Принял список. Текущий пролив — {first} сек. "
+            f"Следующие: {rest_text}."
+        )
+
+    await proceed_to_infusion_color(message, state)
+
+
+async def proceed_to_infusion_color(
+    target: Union[Message, CallbackQuery], state: FSMContext
+) -> None:
+    markup = skip_kb("color").as_markup()
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(
+            "Цвет настоя пролива? Можно пропустить.", reply_markup=markup
+        )
+    else:
+        await target.answer(
+            "Цвет настоя пролива? Можно пропустить.", reply_markup=markup
+        )
     await state.set_state(InfusionState.color)
+
+
+async def inf_seconds_cb(call: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state != InfusionState.seconds.state:
+        await call.answer()
+        return
+
+    try:
+        _, action, payload = call.data.split(":", 2)
+    except ValueError:
+        await call.answer()
+        return
+
+    data = await state.get_data()
+
+    if action == "set":
+        try:
+            value = int(payload)
+        except ValueError:
+            await call.answer()
+            return
+        if value < 1 or value > 600:
+            await call.answer(INFUSIONS_ERROR, show_alert=True)
+            return
+        await state.update_data(cur_seconds=value)
+        await call.answer(f"{value} сек")
+        return
+
+    if action == "adj":
+        try:
+            delta = int(payload)
+        except ValueError:
+            await call.answer()
+            return
+        current = data.get("cur_seconds")
+        base = int(current) if current is not None else 0
+        new_value = base + delta
+        new_value = max(1, min(600, new_value))
+        await state.update_data(cur_seconds=new_value)
+        await call.answer(f"{new_value} сек")
+        return
+
+    if action == "clear":
+        await state.update_data(cur_seconds=None)
+        await call.answer("Сбросил")
+        return
+
+    if action == "done":
+        value = data.get("cur_seconds")
+        if value is None:
+            await call.answer("Сначала выбери время", show_alert=True)
+            return
+        pending = data.get("pending_seconds") or []
+        existing = len(data.get("infusions", []))
+        if existing + 1 + len(pending) > 30:
+            await call.answer(INFUSIONS_ERROR, show_alert=True)
+            return
+        with suppress(TelegramBadRequest):
+            await call.message.edit_reply_markup()
+        await call.answer("Готово")
+        await proceed_to_infusion_color(call, state)
+        return
+
+    await call.answer()
 
 
 async def color_skip(call: CallbackQuery, state: FSMContext):
@@ -2652,20 +3110,22 @@ def prepare_text_edit(field: str, raw: str) -> Tuple[Optional[Union[str, int, fl
             return None, cfg["prompt"], None
         return text, None, cfg["column"]
     if field == "year":
-        if len(text) == 4 and text.isdigit():
-            return int(text), None, cfg["column"]
-        return None, "Год должен состоять из 4 цифр. " + cfg["prompt"], None
+        try:
+            value = parse_year_value(text)
+        except ValueError as exc:
+            return None, f"{exc} {cfg['prompt']}", None
+        return value, None, cfg["column"]
     if field == "grams":
         try:
-            value = float(text.replace(",", "."))
-        except ValueError:
-            return None, "Не удалось распознать число. " + cfg["prompt"], None
+            value = parse_grams_value(text)
+        except ValueError as exc:
+            return None, f"{exc} {cfg['prompt']}", None
         return value, None, cfg["column"]
     if field == "temp_c":
         try:
-            value = int(text)
-        except ValueError:
-            return None, "Используй целое число. " + cfg["prompt"], None
+            value = parse_temp_value(text)
+        except ValueError as exc:
+            return None, f"{exc} {cfg['prompt']}", None
         return value, None, cfg["column"]
     if field == "tasted_at":
         try:
@@ -3255,6 +3715,19 @@ def setup_handlers(dp: Dispatcher):
     dp.message.register(tz_cmd, Command("tz"))
 
     # STATE-хендлеры — раньше любых общих
+    dp.message.register(numpad_clear, StateFilter("*"), F.text == NUMPAD_CLEAR)
+    dp.message.register(numpad_done, StateFilter("*"), F.text == NUMPAD_DONE)
+    dp.message.register(numpad_skip, StateFilter("*"), F.text == NUMPAD_SKIP)
+    dp.message.register(
+        numpad_adjust,
+        StateFilter("*"),
+        F.text.in_(NUMPAD_ADJUST_ALIASES),
+    )
+    dp.message.register(
+        numpad_digit,
+        StateFilter("*"),
+        F.text.in_(NUMPAD_DIGITS),
+    )
     dp.message.register(name_in, NewTasting.name)
     dp.message.register(year_in, NewTasting.year)
     dp.message.register(region_in, NewTasting.region)
@@ -3320,6 +3793,9 @@ def setup_handlers(dp: Dispatcher):
     dp.callback_query.register(aroma_dry_toggle, F.data.startswith("ad:"))
     dp.callback_query.register(aroma_warmed_toggle, F.data.startswith("aw:"))
 
+    dp.callback_query.register(
+        inf_seconds_cb, StateFilter("*"), F.data.startswith("inf:")
+    )
     dp.callback_query.register(color_skip, F.data == "skip:color")
     dp.callback_query.register(taste_toggle, F.data.startswith("taste:"))
     dp.callback_query.register(special_skip, F.data == "skip:special")
