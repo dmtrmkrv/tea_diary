@@ -21,7 +21,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
     # fmt: off
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import SkipHandler, TelegramBadRequest
 
 from sqlalchemy import func, select
 
@@ -746,10 +746,10 @@ async def get_numpad_config(state: FSMContext) -> Optional[NumpadFieldConfig]:
 async def numpad_digit(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        return
+        raise SkipHandler()
     digit = (message.text or "").strip()
     if digit not in NUMPAD_DIGITS:
-        return
+        raise SkipHandler()
 
     data = await state.get_data()
     current = data.get(config.buffer_key) or ""
@@ -767,7 +767,7 @@ async def numpad_digit(message: Message, state: FSMContext) -> None:
 async def numpad_clear(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        return
+        raise SkipHandler()
     await state.update_data({config.buffer_key: "", config.value_key: None})
     await message.answer("Сбросил. Введи значение заново.")
 
@@ -775,7 +775,7 @@ async def numpad_clear(message: Message, state: FSMContext) -> None:
 async def numpad_adjust(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        return
+        raise SkipHandler()
 
     raw = (message.text or "").strip()
     normalized = raw.replace("−", "-")
@@ -785,7 +785,7 @@ async def numpad_adjust(message: Message, state: FSMContext) -> None:
         return
 
     if delta not in config.deltas:
-        return
+        raise SkipHandler()
 
     data = await state.get_data()
     buffer = (data.get(config.buffer_key) or "").replace(",", ".")
@@ -832,7 +832,7 @@ async def numpad_adjust(message: Message, state: FSMContext) -> None:
 async def numpad_done(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        return
+        raise SkipHandler()
     data = await state.get_data()
     raw = (data.get(config.buffer_key) or "").strip()
     if not raw:
@@ -849,7 +849,7 @@ async def numpad_done(message: Message, state: FSMContext) -> None:
 async def numpad_skip(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        return
+        raise SkipHandler()
     if config.state_name == NewTasting.temp_c.state:
         await config.skip(message, state, message.from_user.id)
     else:
