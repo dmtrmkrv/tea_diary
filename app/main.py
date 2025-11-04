@@ -482,21 +482,27 @@ class EditFlow(StatesGroup):
 
 # ---------------- ХЭЛПЕРЫ UI ----------------
 
+def _safe_text(text: Optional[str]) -> str:
+    normalized = (text or "").strip()
+    return normalized if normalized else "\u2060"
+
+
 async def ui(target: Union[CallbackQuery, Message], text: str, reply_markup=None):
+    safe_text = _safe_text(text)
     try:
         if isinstance(target, CallbackQuery):
             msg = target.message
             if getattr(msg, "caption", None) is not None or getattr(msg, "photo", None):
-                await msg.edit_caption(caption=text, reply_markup=reply_markup)
+                await msg.edit_caption(caption=safe_text, reply_markup=reply_markup)
             else:
-                await msg.edit_text(text, reply_markup=reply_markup)
+                await msg.edit_text(safe_text, reply_markup=reply_markup)
         else:
-            await target.answer(text, reply_markup=reply_markup)
+            await target.answer(safe_text, reply_markup=reply_markup)
     except TelegramBadRequest:
         if isinstance(target, CallbackQuery):
-            await target.message.answer(text, reply_markup=reply_markup)
+            await target.message.answer(safe_text, reply_markup=reply_markup)
         else:
-            await target.answer(text, reply_markup=reply_markup)
+            await target.answer(safe_text, reply_markup=reply_markup)
 
 
 async def remove_reply_keyboard(message: Message) -> None:
@@ -594,11 +600,10 @@ async def send_numpad_prompt(
 
 
 async def ask_year_prompt(message: Message, state: FSMContext) -> None:
-    config = NUMPAD_CONFIGS.get(NewTasting.year.state)
-    if not config:
-        return
-    await send_numpad_prompt(message, state, config, "📅 Год сбора? Можно пропустить.")
-    await state.update_data(numpad_active=True)
+    max_year = get_year_max_value()
+    prompt = f"Укажи год числом (1900–{max_year}). Можно пропустить."
+    await state.update_data(numpad_active=False)
+    await message.answer(prompt, reply_markup=skip_kb("year").as_markup())
     await state.set_state(NewTasting.year)
 
 
@@ -703,20 +708,6 @@ async def skip_temp_value(
 
 NUMPAD_CONFIGS.update(
     {
-        NewTasting.year.state: NumpadFieldConfig(
-            state_name=NewTasting.year.state,
-            buffer_key="year_input",
-            value_key="year",
-            min_value=YEAR_MIN,
-            max_value=get_year_max_value(),
-            deltas=[-10, -1, 1, 10],
-            formatter=lambda v: format_numpad_value(v, decimals=0),
-            parser=parse_year_value,
-            ready=finalize_year_input,
-            skip=skip_year_value,
-            placeholder="год",
-            decimals=0,
-        ),
         NewTasting.grams.state: NumpadFieldConfig(
             state_name=NewTasting.grams.state,
             buffer_key="grams_input",
@@ -1571,17 +1562,20 @@ async def year_skip(call: CallbackQuery, state: FSMContext):
 
 
 async def year_in(message: Message, state: FSMContext):
-    cfg = NUMPAD_CONFIGS.get(NewTasting.year.state)
-    if not cfg:
-        return
     raw = (message.text or "").strip()
+    if raw.casefold() == "пропустить":
+        await skip_year_value(message, state)
+        return
+
     await state.update_data(year_input=raw)
     try:
-        value = cfg.parser(raw)
+        value = parse_year_value(raw)
     except ValueError as exc:
         await message.answer(str(exc))
+        await ask_year_prompt(message, state)
         return
-    await cfg.ready(message, state, value)
+
+    await finalize_year_input(message, state, value)
 
 
 async def region_skip(call: CallbackQuery, state: FSMContext):
