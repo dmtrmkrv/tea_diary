@@ -464,57 +464,6 @@ class RatingSummary(StatesGroup):
     summary = State()
 
 
-NUMPAD_CONFIGS.update(
-    {
-        NewTasting.year.state: NumpadFieldConfig(
-            state_name=NewTasting.year.state,
-            buffer_key="year_input",
-            value_key="year",
-            min_value=YEAR_MIN,
-            max_value=get_year_max_value(),
-            deltas=[-10, -1, 1, 10],
-            formatter=lambda v: format_numpad_value(v, decimals=0),
-            parser=parse_year_value,
-            ready=finalize_year_input,
-            skip=skip_year_value,
-            placeholder="год",
-            decimals=0,
-        ),
-        NewTasting.grams.state: NumpadFieldConfig(
-            state_name=NewTasting.grams.state,
-            buffer_key="grams_input",
-            value_key="grams",
-            min_value=0.1,
-            max_value=50.0,
-            deltas=[-10, -1, 1, 10],
-            formatter=lambda v: format_numpad_value(v, decimals=1),
-            parser=parse_grams_value,
-            ready=finalize_grams_input,
-            skip=skip_grams_value,
-            placeholder="граммы",
-            unit=" г",
-            decimals=1,
-        ),
-        NewTasting.temp_c.state: NumpadFieldConfig(
-            state_name=NewTasting.temp_c.state,
-            buffer_key="temp_input",
-            value_key="temp_c",
-            min_value=40,
-            max_value=100,
-            deltas=[-10, -5, -1, 1, 5, 10],
-            formatter=lambda v: format_numpad_value(v, decimals=0),
-            parser=parse_temp_value,
-            ready=finalize_temp_input,
-            skip=skip_temp_value,
-            placeholder="температура",
-            unit=" °C",
-            decimals=0,
-            include_mid_steps=True,
-        ),
-    }
-)
-
-
 class PhotoFlow(StatesGroup):
     photos = State()
 
@@ -734,6 +683,57 @@ async def skip_temp_value(
     await remove_reply_keyboard(message)
     if uid is not None:
         await ask_tasted_at_prompt(message, state, uid)
+
+
+NUMPAD_CONFIGS.update(
+    {
+        NewTasting.year.state: NumpadFieldConfig(
+            state_name=NewTasting.year.state,
+            buffer_key="year_input",
+            value_key="year",
+            min_value=YEAR_MIN,
+            max_value=get_year_max_value(),
+            deltas=[-10, -1, 1, 10],
+            formatter=lambda v: format_numpad_value(v, decimals=0),
+            parser=parse_year_value,
+            ready=finalize_year_input,
+            skip=skip_year_value,
+            placeholder="год",
+            decimals=0,
+        ),
+        NewTasting.grams.state: NumpadFieldConfig(
+            state_name=NewTasting.grams.state,
+            buffer_key="grams_input",
+            value_key="grams",
+            min_value=0.1,
+            max_value=50.0,
+            deltas=[-10, -1, 1, 10],
+            formatter=lambda v: format_numpad_value(v, decimals=1),
+            parser=parse_grams_value,
+            ready=finalize_grams_input,
+            skip=skip_grams_value,
+            placeholder="граммы",
+            unit=" г",
+            decimals=1,
+        ),
+        NewTasting.temp_c.state: NumpadFieldConfig(
+            state_name=NewTasting.temp_c.state,
+            buffer_key="temp_input",
+            value_key="temp_c",
+            min_value=40,
+            max_value=100,
+            deltas=[-10, -5, -1, 1, 5, 10],
+            formatter=lambda v: format_numpad_value(v, decimals=0),
+            parser=parse_temp_value,
+            ready=finalize_temp_input,
+            skip=skip_temp_value,
+            placeholder="температура",
+            unit=" °C",
+            decimals=0,
+            include_mid_steps=True,
+        ),
+    }
+)
 
 
 async def get_numpad_config(state: FSMContext) -> Optional[NumpadFieldConfig]:
