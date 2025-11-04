@@ -14,10 +14,23 @@ Configure the following variables (see `.env.example`) when deploying to Timeweb
 - `POSTGRESQL_PASSWORD`
 - `POSTGRESQL_SSLMODE`
 - `ADMINS`
+- `MEDIA_BACKEND`
+- `S3_ENDPOINT_URL`
+- `S3_REGION`
+- `S3_BUCKET`
+- `S3_ACCESS_KEY`
+- `S3_SECRET_KEY`
+- `MEDIA_DIR`
 
 Locally, the bot falls back to `sqlite:////app/tastings.db` if the full PostgreSQL configuration is not provided.
 
 Set `ADMINS` to a comma-, space-, or semicolon-separated list of Telegram user IDs, for example `ADMINS="12345,67890"` or `ADMINS="12345 67890"`. In production (`APP_ENV=production`) this variable must be populated; otherwise, diagnostic commands that expose database status will be disabled.
+
+### Media storage
+
+Media files are stored locally by default. Set `MEDIA_BACKEND=s3` together with the S3 configuration variables (`S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) to store uploads in Timeweb Cloud Object Storage. If any of these variables are missing or an S3 request fails, the bot automatically falls back to the local backend.
+
+For local storage you can override the root directory with `MEDIA_DIR` (default: `/app/media`).
 
 ## Running
 
@@ -54,9 +67,10 @@ Timeweb builds the image using the repo's Dockerfile and runs migrations automat
 ### Продакшн
 
 - Если `ADMINS` пуст — диагностические команды отключены (fail-closed).
-- Если `ADMINS` заполнен — подключается роутер с публичной `/whoami` и админскими `/dbinfo`, `/health`.
+- Если `ADMINS` заполнен — подключается роутер с публичной `/whoami` и админскими `/dbinfo`, `/health`. В ответе `/dbinfo` пароль скрывается.
 
 ### Дев
 
 - Диагностический роутер подключается всегда.
 - Команды `/dbinfo` и `/health` доступны только администраторам, а `/whoami` остаётся публичной.
+- Дополнительные дев-эндпоинты из `app/handlers/health.py` не подключаются в продакшн окружении.

@@ -1,13 +1,15 @@
 import asyncio
 import base64
 import datetime
+import io
 import logging
 import os
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from contextlib import suppress
+from typing import Dict, List, Optional, Tuple, TypedDict, Union
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import (
     Message, CallbackQuery, BotCommand,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, FSInputFile,
@@ -143,6 +145,13 @@ ALBUM_TIMEOUT = 2.0
 ALBUM_BUFFER: Dict[Tuple[int, str], dict] = {}
 MORE_THROTTLE: Dict[int, float] = {}
 MORE_THROTTLE_INTERVAL = 1.0
+
+
+class PhotoDraft(TypedDict):
+    body: bytes
+    filename_hint: str
+    telegram_file_id: str
+    telegram_file_unique_id: str
 
 
 # ---------------- КЛАВИАТУРЫ ----------------
@@ -343,12 +352,66 @@ def confirm_del_kb(t_id: int) -> InlineKeyboardBuilder:
     return kb
 
 
-def photos_kb() -> InlineKeyboardBuilder:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Готово", callback_data="photos:done")
-    kb.button(text="Пропустить", callback_data="skip:photos")
-    kb.adjust(2)
-    return kb
+def photo_status_markup(count: int, limit: int) -> Tuple[str, InlineKeyboardMarkup]:
+    if count >= limit:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Готово", callback_data="photos:done")]
+            ]
+        )
+        text = f"✅ Добавлено {count}/{limit}. Нажмите «Готово»."
+    else:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Готово", callback_data="photos:done"),
+                    InlineKeyboardButton(text="Пропустить", callback_data="skip:photos"),
+                ]
+            ]
+        )
+        text = f"Добавлено {count}/{limit}. Отправьте ещё или нажмите «Готово»."
+    return text, kb
+
+
+async def update_photo_progress(
+    message: Message,
+    state: FSMContext,
+    count: int,
+    limit: int,
+    *,
+    prefix: Optional[str] = None,
+    force: bool = True,
+) -> None:
+    data = await state.get_data()
+    progress_id = data.get("progress_msg_id")
+
+    if not progress_id and not force:
+        await state.update_data(photo_count=count, photo_limit=limit)
+        return
+
+    if progress_id:
+        with suppress(Exception):
+            await message.bot.delete_message(message.chat.id, progress_id)
+
+    text, markup = photo_status_markup(count, limit)
+    if prefix:
+        text = f"{prefix} {text}" if not prefix.endswith(" ") else f"{prefix}{text}"
+
+    sent = await message.answer(text, reply_markup=markup)
+    await state.update_data(
+        progress_msg_id=sent.message_id,
+        photo_count=count,
+        photo_limit=limit,
+    )
+
+
+async def clear_photo_progress(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    progress_id = data.get("progress_msg_id")
+    if progress_id:
+        with suppress(Exception):
+            await bot.delete_message(chat_id, progress_id)
+    await state.update_data(progress_msg_id=None)
 
 
 # ---------------- FSM ----------------
@@ -682,46 +745,100 @@ async def send_card_with_media(
                 )
 
 
+async def _store_photo_from_file_id(
+    message: Message,
+    state: FSMContext,
+    file_id: str,
+    photos: List[PhotoDraft],
+    *,
+    file_unique_id: Optional[str] = None,
+) -> bool:
+    try:
+        tg_file = await message.bot.get_file(file_id)
+    except Exception:
+        logger.exception("Failed to get Telegram file %s", file_id)
+        await message.answer("Не удалось получить файл из Telegram. Попробуйте ещё раз.")
+        return False
+
+    file_path = getattr(tg_file, "file_path", None) or ""
+    filename_hint = os.path.basename(file_path) or "photo.jpg"
+
+    buffer = io.BytesIO()
+    try:
+        await message.bot.download_file(file_path, buffer)
+    except Exception:
+        logger.exception("Failed to download Telegram file %s", file_id)
+        await message.answer("Не удалось скачать фото. Попробуйте ещё раз.")
+        return False
+
+    body = buffer.getvalue()
+
+    photos.append(
+        {
+            "body": body,
+            "filename_hint": filename_hint,
+            "telegram_file_id": file_id,
+            "telegram_file_unique_id": file_unique_id or file_id,
+        }
+    )
+    await state.update_data(new_photos=photos)
+    return True
+
+
 async def _process_album_entry(entry: dict) -> None:
     state: Optional[FSMContext] = entry.get("state")
     message: Optional[Message] = entry.get("message")
-    file_ids: List[str] = entry.get("file_ids", [])
-    if not state or not message or not file_ids:
+    files: List[dict] = entry.get("files", [])
+    if not state or not message or not files:
         return
     try:
         data = await state.get_data()
     except Exception:
         return
-    photos: List[str] = data.get("new_photos", []) or []
-    capacity = MAX_PHOTOS - len(photos)
-    accepted: List[str] = file_ids[: capacity if capacity > 0 else 0]
-    extra = len(file_ids) - len(accepted)
-    if accepted:
-        photos.extend(accepted)
-        await state.update_data(new_photos=photos)
+    photos: List[PhotoDraft] = list(data.get("new_photos", []) or [])
+    limit = int(data.get("photo_limit", MAX_PHOTOS))
+    progress_present = data.get("progress_msg_id") is not None
+    capacity = limit - len(photos)
     if capacity <= 0:
-        await message.answer(
-            f"Можно добавить максимум {MAX_PHOTOS} фото, лишние я не сохранил."
-        )
-        await message.answer(
-            f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
-        )
-        return
-    if not accepted:
-        await message.answer(
-            f"Можно добавить максимум {MAX_PHOTOS} фото, лишние я не сохранил."
-        )
-        await message.answer(
-            f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
+        await update_photo_progress(
+            message,
+            state,
+            len(photos),
+            limit,
+            force=progress_present,
         )
         return
+
+    accepted: List[dict] = files[:capacity]
+    extra = len(files) - len(accepted)
+    saved_any = False
+    for file_entry in accepted:
+        file_id = file_entry.get("file_id")
+        if not file_id:
+            continue
+        if await _store_photo_from_file_id(
+            message,
+            state,
+            file_id,
+            photos,
+            file_unique_id=file_entry.get("file_unique_id"),
+        ):
+            saved_any = True
+
+    if not saved_any:
+        return
+
+    await update_photo_progress(
+        message,
+        state,
+        len(photos),
+        limit,
+        force=progress_present,
+    )
     if extra > 0:
         await message.answer(
-            f"Из-за лимита {MAX_PHOTOS} фото сохранил только часть альбома."
+            f"Из-за лимита {limit} фото сохранил только часть альбома."
         )
-    await message.answer(
-        f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
-    )
 
 
 async def _album_timeout_handler(key: Tuple[int, str]) -> None:
@@ -813,18 +930,30 @@ async def finalize_save(target_message: Message, state: FSMContext):
     }
 
     infusions_data = data.get("infusions", [])
-    new_photos: List[str] = (data.get("new_photos", []) or [])[:MAX_PHOTOS]
+    photo_entries: List[PhotoDraft] = (
+        list(data.get("new_photos", []) or [])[:MAX_PHOTOS]
+    )
 
-    t = create_tasting(tasting_data, infusions_data, new_photos)
+    t = create_tasting(tasting_data, infusions_data, photo_entries)
 
     await state.clear()
 
-    text_card = build_card_text(t, infusions_data, photo_count=len(new_photos))
+    text_card = build_card_text(t, infusions_data, photo_count=len(photo_entries))
+    photo_ids_to_send: List[str] = []
+    for entry in photo_entries:
+        if isinstance(entry, dict):
+            telegram_file_id = entry.get("telegram_file_id")
+            if telegram_file_id:
+                photo_ids_to_send.append(telegram_file_id)
+            continue
+
+        if isinstance(entry, str) and entry:
+            photo_ids_to_send.append(entry)
     await send_card_with_media(
         target_message,
         t.id,
         text_card,
-        new_photos,
+        photo_ids_to_send,
         reply_markup=card_actions_kb(t.id).as_markup(),
     )
 
@@ -837,59 +966,83 @@ async def prompt_photos(target: Union[Message, CallbackQuery], state: FSMContext
         state,
         process=False,
     )
-    await state.update_data(new_photos=[])
-    txt = (
-        f"📷 Добавьте фото (до {MAX_PHOTOS}). Добавлено 0/{MAX_PHOTOS}. "
-        "Отправьте ещё или нажмите «Дальше»."
-    )
-    kb = photos_kb().as_markup()
+    base_message: Optional[Message]
     if isinstance(target, CallbackQuery):
-        await ui(target, txt, reply_markup=kb)
+        base_message = target.message
+    elif isinstance(target, Message):
+        base_message = target
     else:
-        await target.answer(txt, reply_markup=kb)
+        base_message = None
+
+    await state.update_data(
+        new_photos=[],
+        photo_count=0,
+        photo_limit=MAX_PHOTOS,
+    )
+
+    if isinstance(target, CallbackQuery):
+        await ui(target, f"📷 Добавьте фото (до {MAX_PHOTOS}).", reply_markup=None)
+
+    if base_message is not None:
+        await clear_photo_progress(base_message.bot, base_message.chat.id, state)
+        await update_photo_progress(
+            base_message,
+            state,
+            0,
+            MAX_PHOTOS,
+            prefix=f"📷 Добавьте фото (до {MAX_PHOTOS}).",
+        )
     await state.set_state(PhotoFlow.photos)
 
 
 async def photo_add(message: Message, state: FSMContext):
     data = await state.get_data()
-    photos: List[str] = data.get("new_photos", []) or []
-    if not message.photo:
-        await message.answer(
-            "Пришли фото (или жми «Готово» / «Пропустить»)."
-        )
+    limit = data.get("photo_limit")
+    if limit is None:
         return
-    if len(photos) >= MAX_PHOTOS:
-        await message.answer(
-            f"Можно добавить максимум {MAX_PHOTOS} фото. Нажми «Дальше» или «Пропустить»."
-        )
+    limit = int(limit)
+
+    photos: List[PhotoDraft] = list(data.get("new_photos", []) or [])
+    if len(photos) >= limit:
+        await update_photo_progress(message, state, len(photos), limit)
         return
 
     uid = data.get("user_id") or message.from_user.id
     media_group_id = message.media_group_id
-    fid = message.photo[-1].file_id
+    photo_obj = message.photo[-1]
+    fid = photo_obj.file_id
+    fuid = photo_obj.file_unique_id
 
     if media_group_id:
         key = (uid, media_group_id)
         entry = ALBUM_BUFFER.get(key)
         if not entry:
-            entry = {"file_ids": [], "message": message, "state": state, "task": None}
+            entry = {"files": [], "message": message, "state": state, "task": None}
             ALBUM_BUFFER[key] = entry
-        entry["file_ids"].append(fid)
+        entry.setdefault("files", []).append(
+            {"file_id": fid, "file_unique_id": fuid}
+        )
         entry["message"] = message
         entry["state"] = state
         task: Optional[asyncio.Task] = entry.get("task")
         if task and not task.done():
             task.cancel()
         entry["task"] = asyncio.create_task(_album_timeout_handler(key))
-    else:
-        photos.append(fid)
-        await state.update_data(new_photos=photos)
-        await message.answer(
-            f"Добавлено {len(photos)}/{MAX_PHOTOS}. Отправьте ещё или нажмите «Дальше»."
-        )
+        return
+
+    if await _store_photo_from_file_id(
+        message,
+        state,
+        fid,
+        photos,
+        file_unique_id=fuid,
+    ):
+        await update_photo_progress(message, state, len(photos), limit)
 
 
 async def photos_done(call: CallbackQuery, state: FSMContext):
+    if call.message:
+        await clear_photo_progress(call.bot, call.message.chat.id, state)
     await finalize_save(call.message, state)
     await call.answer()
 
@@ -897,6 +1050,8 @@ async def photos_done(call: CallbackQuery, state: FSMContext):
 async def photos_skip(call: CallbackQuery, state: FSMContext):
     await flush_user_albums(call.from_user.id, state, process=False)
     await state.update_data(new_photos=[])
+    if call.message:
+        await clear_photo_progress(call.bot, call.message.chat.id, state)
     await finalize_save(call.message, state)
     await call.answer()
 
@@ -915,7 +1070,11 @@ async def show_pics(call: CallbackQuery):
             await ui(call, "Фото не найдены.")
             await call.answer()
             return
-        pics = [p.file_id for p in (t.photos or [])]
+        pics = [
+            (p.telegram_file_id or p.file_id)
+            for p in (t.photos or [])
+            if (p.telegram_file_id or p.file_id)
+        ]
 
     if not pics:
         await ui(call, "Фото нет.")
@@ -2340,7 +2499,7 @@ async def open_card(call: CallbackQuery):
         )
         photo_ids = (
             s.execute(
-                select(Photo.file_id)
+                select(func.coalesce(Photo.telegram_file_id, Photo.file_id))
                 .where(Photo.tasting_id == tid)
                 .order_by(Photo.id.asc())
                 .limit(MAX_PHOTOS)
@@ -3078,7 +3237,7 @@ def setup_handlers(dp: Dispatcher):
     dp.message.register(eff_custom, EffectsScenarios.effects)
     dp.message.register(scn_custom, EffectsScenarios.scenarios)
 
-    dp.message.register(photo_add, PhotoFlow.photos)
+    dp.message.register(photo_add, StateFilter("*"), F.photo)
 
     # поиск (message)
     dp.message.register(s_name_run, SearchFlow.name)
