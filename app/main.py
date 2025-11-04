@@ -21,11 +21,12 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
     # fmt: off
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import ContinuePropagation, TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest
 
 from sqlalchemy import func, select
 
 from app.config import get_bot_token, get_db_url
+from app.filters.numpad_active import NumpadActive
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
 from app.db.models import Infusion, Photo, Tasting, User
 from app.routers.diagnostics import create_router
@@ -597,6 +598,7 @@ async def ask_year_prompt(message: Message, state: FSMContext) -> None:
     if not config:
         return
     await send_numpad_prompt(message, state, config, "📅 Год сбора? Можно пропустить.")
+    await state.update_data(numpad_active=True)
     await state.set_state(NewTasting.year)
 
 
@@ -605,6 +607,7 @@ async def ask_grams_prompt(message: Message, state: FSMContext) -> None:
     if not config:
         return
     await send_numpad_prompt(message, state, config, "⚖️ Граммовка? Можно пропустить.")
+    await state.update_data(numpad_active=True)
     await state.set_state(NewTasting.grams)
 
 
@@ -613,6 +616,7 @@ async def ask_temp_prompt(message: Message, state: FSMContext) -> None:
     if not config:
         return
     await send_numpad_prompt(message, state, config, "🌡️ Температура, °C? Можно пропустить.")
+    await state.update_data(numpad_active=True)
     await state.set_state(NewTasting.temp_c)
 
 
@@ -634,7 +638,11 @@ async def ask_tasted_at_prompt(
 
 async def finalize_year_input(message: Message, state: FSMContext, value: int) -> None:
     formatted = format_numpad_value(value, decimals=0)
-    await state.update_data(year=value, year_input=formatted)
+    await state.update_data(
+        year=value,
+        year_input=formatted,
+        numpad_active=False,
+    )
     await remove_reply_keyboard(message)
     await message.answer(
         "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
@@ -643,7 +651,7 @@ async def finalize_year_input(message: Message, state: FSMContext, value: int) -
 
 
 async def skip_year_value(message: Message, state: FSMContext) -> None:
-    await state.update_data(year=None, year_input="")
+    await state.update_data(year=None, year_input="", numpad_active=False)
     await remove_reply_keyboard(message)
     await message.answer(
         "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
@@ -653,20 +661,28 @@ async def skip_year_value(message: Message, state: FSMContext) -> None:
 
 async def finalize_grams_input(message: Message, state: FSMContext, value: float) -> None:
     formatted = format_numpad_value(value, decimals=1)
-    await state.update_data(grams=value, grams_input=formatted)
+    await state.update_data(
+        grams=value,
+        grams_input=formatted,
+        numpad_active=False,
+    )
     await remove_reply_keyboard(message)
     await ask_temp_prompt(message, state)
 
 
 async def skip_grams_value(message: Message, state: FSMContext) -> None:
-    await state.update_data(grams=None, grams_input="")
+    await state.update_data(grams=None, grams_input="", numpad_active=False)
     await remove_reply_keyboard(message)
     await ask_temp_prompt(message, state)
 
 
 async def finalize_temp_input(message: Message, state: FSMContext, value: int) -> None:
     formatted = format_numpad_value(value, decimals=0)
-    await state.update_data(temp_c=value, temp_input=formatted)
+    await state.update_data(
+        temp_c=value,
+        temp_input=formatted,
+        numpad_active=False,
+    )
     await remove_reply_keyboard(message)
     await ask_tasted_at_prompt(message, state, message.from_user.id)
 
@@ -679,7 +695,7 @@ async def skip_temp_value(
     if uid is None:
         data = await state.get_data()
         uid = data.get("user_id")
-    await state.update_data(temp_c=None, temp_input="")
+    await state.update_data(temp_c=None, temp_input="", numpad_active=False)
     await remove_reply_keyboard(message)
     if uid is not None:
         await ask_tasted_at_prompt(message, state, uid)
@@ -746,10 +762,10 @@ async def get_numpad_config(state: FSMContext) -> Optional[NumpadFieldConfig]:
 async def numpad_digit(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        raise ContinuePropagation()
+        return
     digit = (message.text or "").strip()
     if digit not in NUMPAD_DIGITS:
-        raise ContinuePropagation()
+        return
 
     data = await state.get_data()
     current = data.get(config.buffer_key) or ""
@@ -767,7 +783,7 @@ async def numpad_digit(message: Message, state: FSMContext) -> None:
 async def numpad_clear(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        raise ContinuePropagation()
+        return
     await state.update_data({config.buffer_key: "", config.value_key: None})
     await message.answer("Сбросил. Введи значение заново.")
 
@@ -775,7 +791,7 @@ async def numpad_clear(message: Message, state: FSMContext) -> None:
 async def numpad_adjust(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        raise ContinuePropagation()
+        return
 
     raw = (message.text or "").strip()
     normalized = raw.replace("−", "-")
@@ -785,7 +801,7 @@ async def numpad_adjust(message: Message, state: FSMContext) -> None:
         return
 
     if delta not in config.deltas:
-        raise ContinuePropagation()
+        return
 
     data = await state.get_data()
     buffer = (data.get(config.buffer_key) or "").replace(",", ".")
@@ -832,7 +848,7 @@ async def numpad_adjust(message: Message, state: FSMContext) -> None:
 async def numpad_done(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        raise ContinuePropagation()
+        return
     data = await state.get_data()
     raw = (data.get(config.buffer_key) or "").strip()
     if not raw:
@@ -849,7 +865,7 @@ async def numpad_done(message: Message, state: FSMContext) -> None:
 async def numpad_skip(message: Message, state: FSMContext) -> None:
     config = await get_numpad_config(state)
     if not config:
-        raise ContinuePropagation()
+        return
     if config.state_name == NewTasting.temp_c.state:
         await config.skip(message, state, message.from_user.id)
     else:
@@ -1518,6 +1534,7 @@ async def start_new(state: FSMContext, uid: int):
         year_input="",
         grams_input="",
         temp_input="",
+        numpad_active=False,
     )
     await state.set_state(NewTasting.name)
 
@@ -1525,6 +1542,7 @@ async def start_new(state: FSMContext, uid: int):
 async def new_cmd(message: Message, state: FSMContext):
     uid = message.from_user.id
     await state.clear()
+    await state.update_data(numpad_active=False)
     await flush_user_albums(uid, state, process=False)
     get_or_create_user(uid, message.from_user.username)
     await start_new(state, uid)
@@ -1534,6 +1552,7 @@ async def new_cmd(message: Message, state: FSMContext):
 async def new_cb(call: CallbackQuery, state: FSMContext):
     uid = call.from_user.id
     await state.clear()
+    await state.update_data(numpad_active=False)
     await flush_user_albums(uid, state, process=False)
     get_or_create_user(uid, call.from_user.username)
     await start_new(state, uid)
@@ -3552,7 +3571,8 @@ async def show_main_menu(bot: Bot, chat_id: int):
     )
 
 
-async def on_start(message: Message):
+async def on_start(message: Message, state: FSMContext):
+    await state.update_data(numpad_active=False)
     await show_main_menu(message.bot, message.chat.id)
 
 
@@ -3593,6 +3613,7 @@ async def help_cmd(message: Message):
 
 async def cancel_cmd(message: Message, state: FSMContext):
     await state.clear()
+    await state.update_data(numpad_active=False)
     await message.answer(
         "Ок, сбросил. Возвращаю в меню.",
         reply_markup=main_kb().as_markup(),
@@ -3605,6 +3626,7 @@ async def reset_cmd(message: Message, state: FSMContext):
 
 async def reset_state_cmd(message: Message, state: FSMContext):
     await state.clear()
+    await state.update_data(numpad_active=False)
     await flush_user_albums(message.from_user.id, state, process=False)
     await message.answer("Сбросил состояние.")
 
@@ -3649,6 +3671,7 @@ async def back_main(call: CallbackQuery):
 async def nav_home(call: CallbackQuery, state: FSMContext):
     await state.update_data(edit_t_id=None, edit_field=None, edit_ctx_warned=False)
     await state.clear()
+    await state.update_data(numpad_active=False)
     await show_main_menu(call.message.bot, call.from_user.id)
     await call.answer()
 
@@ -3715,17 +3738,19 @@ def setup_handlers(dp: Dispatcher):
     dp.message.register(tz_cmd, Command("tz"))
 
     # STATE-хендлеры — раньше любых общих
-    dp.message.register(numpad_clear, StateFilter("*"), F.text == NUMPAD_CLEAR)
-    dp.message.register(numpad_done, StateFilter("*"), F.text == NUMPAD_DONE)
-    dp.message.register(numpad_skip, StateFilter("*"), F.text == NUMPAD_SKIP)
+    dp.message.register(numpad_clear, StateFilter("*"), NumpadActive(), F.text == NUMPAD_CLEAR)
+    dp.message.register(numpad_done, StateFilter("*"), NumpadActive(), F.text == NUMPAD_DONE)
+    dp.message.register(numpad_skip, StateFilter("*"), NumpadActive(), F.text == NUMPAD_SKIP)
     dp.message.register(
         numpad_adjust,
         StateFilter("*"),
+        NumpadActive(),
         F.text.in_(NUMPAD_ADJUST_ALIASES),
     )
     dp.message.register(
         numpad_digit,
         StateFilter("*"),
+        NumpadActive(),
         F.text.in_(NUMPAD_DIGITS),
     )
     dp.message.register(name_in, NewTasting.name)
