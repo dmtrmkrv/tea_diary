@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import datetime
+import html
 import io
 import logging
 import os
@@ -209,7 +210,7 @@ def skip_kb(tag: str) -> InlineKeyboardBuilder:
 
 def time_kb() -> InlineKeyboardBuilder:
     kb = InlineKeyboardBuilder()
-    kb.button(text="Текущее время", callback_data="time:now")
+    kb.button(text="🕒 Текущее время", callback_data="time:now")
     kb.button(text="Пропустить", callback_data="skip:tasted_at")
     kb.adjust(1, 1)
     return kb
@@ -483,7 +484,13 @@ async def ui(target: Union[CallbackQuery, Message], text: str, reply_markup=None
 
 
 def short_row(t: Tasting) -> str:
-    return f"#{t.seq_no} [{t.category}] {t.name}"
+    meta: List[str] = []
+    if t.year:
+        meta.append(str(t.year))
+    if t.region:
+        meta.append(t.region)
+    suffix = f" — {' • '.join(meta)}" if meta else ""
+    return f"#{t.seq_no} [{t.category}] {t.name}{suffix}"
 
 
 def build_card_text(
@@ -491,46 +498,69 @@ def build_card_text(
     infusions: List[dict],
     photo_count: Optional[int] = None,
 ) -> str:
-    lines = [f"#{t.seq_no} {t.title}"]
+    def fmt_text(value: Optional[Union[str, int, float]]) -> str:
+        if value is None:
+            return "—"
+        if isinstance(value, str):
+            if not value.strip():
+                return "—"
+            return html.escape(value)
+        if isinstance(value, float):
+            return html.escape(f"{value:g}")
+        return html.escape(str(value))
+
+    def fmt_seconds(value: Optional[Union[str, int]]) -> str:
+        if value is None:
+            return "— сек"
+        return html.escape(f"{value} сек")
+
+    lines = [f"<b>#{t.seq_no} {html.escape(t.title)}</b>"]
     lines.append(f"⭐ Оценка: {t.rating}")
     if t.grams is not None:
-        lines.append(f"⚖️ Граммовка: {t.grams} г")
+        lines.append(f"⚖️ Граммовка: {fmt_text(t.grams)} г")
     if t.temp_c is not None:
-        lines.append(f"🌡️ Температура: {t.temp_c} °C")
+        lines.append(f"🌡️ Температура: {fmt_text(t.temp_c)} °C")
     if t.tasted_at:
-        lines.append(f"⏰ Время дегустации: {t.tasted_at}")
+        lines.append(f"⏰ Время дегустации: {fmt_text(t.tasted_at)}")
     if t.gear:
-        lines.append(f"🍶 Посуда: {t.gear}")
+        lines.append(f"🍶 Посуда: {fmt_text(t.gear)}")
 
     if t.aroma_dry or t.aroma_warmed:
         lines.append("🌬️ Ароматы:")
         if t.aroma_dry:
-            lines.append(f"  ▫️ сухой лист: {t.aroma_dry}")
+            lines.append(f"  ▫️ сухой лист: {fmt_text(t.aroma_dry)}")
         if t.aroma_warmed:
-            lines.append(f"  ▫️ прогретый/промытый лист: {t.aroma_warmed}")
+            lines.append(f"  ▫️ прогретый/промытый лист: {fmt_text(t.aroma_warmed)}")
 
     if t.effects_csv:
-        lines.append(f"🧘 Ощущения: {t.effects_csv}")
+        lines.append(f"🧘 Ощущения: {fmt_text(t.effects_csv)}")
     if t.scenarios_csv:
-        lines.append(f"🎯 Сценарии: {t.scenarios_csv}")
+        lines.append(f"🎯 Сценарии: {fmt_text(t.scenarios_csv)}")
     if t.summary:
-        lines.append(f"📝 Заметка: {t.summary}")
+        lines.append(f"📝 Заметка: {fmt_text(t.summary)}")
 
     if photo_count:
-        lines.append(f"📷 Фото: {photo_count} шт.")
+        lines.append(f"📷 Фото: {fmt_text(photo_count)} шт.")
 
     if infusions:
-        lines.append("🫖 Проливы:")
+        lines.append("<b>🫖 Проливы:</b>")
         for inf in infusions:
-            lines.append(
-                f"  #{inf.get('n')}: "
-                f"{(inf.get('seconds') or '-') } сек; "
-                f"цвет: {inf.get('liquor_color') or '-'}; "
-                f"вкус: {inf.get('taste') or '-'}; "
-                f"ноты: {inf.get('special_notes') or '-'}; "
-                f"тело: {inf.get('body') or '-'}; "
-                f"послевкусие: {inf.get('aftertaste') or '-'}"
-            )
+            prefix = f"#{inf.get('n')}" if inf.get("n") is not None else "#?"
+            color = fmt_text(inf.get("liquor_color"))
+            taste = fmt_text(inf.get("taste"))
+            notes = fmt_text(inf.get("special_notes"))
+            body = fmt_text(inf.get("body"))
+            aftertaste = fmt_text(inf.get("aftertaste"))
+            seconds = fmt_seconds(inf.get("seconds"))
+            line_parts = [
+                f"{html.escape(prefix)}: {seconds}",
+                f"<b>Цвет:</b> {color}",
+                f"<b>Вкус:</b> {taste}",
+                f"<b>Ноты:</b> {notes}",
+                f"<b>Тело:</b> {body}",
+                f"<b>Послевкусие:</b> {aftertaste}",
+            ]
+            lines.append("• " + "; ".join(line_parts))
     return "\n".join(lines)
 
 
@@ -699,6 +729,7 @@ async def send_card_with_media(
             await bot.send_message(
                 chat_id,
                 chunk,
+                parse_mode="HTML",
                 reply_markup=(reply_markup if not markup_sent and reply_markup and idx == 0 else None),
             )
             if reply_markup and not markup_sent and idx == 0:
@@ -720,7 +751,13 @@ async def send_card_with_media(
             media: List[InputMediaPhoto] = []
             for idx, fid in enumerate(photos):
                 if idx == 0 and use_caption:
-                    media.append(InputMediaPhoto(media=fid, caption=text_card))
+                    media.append(
+                        InputMediaPhoto(
+                            media=fid,
+                            caption=text_card,
+                            parse_mode="HTML",
+                        )
+                    )
                 else:
                     media.append(InputMediaPhoto(media=fid))
             await bot.send_media_group(chat_id, media)
@@ -1244,7 +1281,7 @@ async def temp_skip(call: CallbackQuery, state: FSMContext):
     await ui(
         call,
         f"⏰ Время дегустации? Сейчас {now_hm}. "
-        "Введи HH:MM, нажми «Текущее время» или пропусти.",
+        "Введи ЧЧ:ММ, нажми «🕒 Текущее время» или пропусти.",
         reply_markup=time_kb().as_markup(),
     )
     await state.set_state(NewTasting.tasted_at)
@@ -1263,7 +1300,7 @@ async def temp_in(message: Message, state: FSMContext):
     now_hm = get_user_now_hm(message.from_user.id)
     await message.answer(
         f"⏰ Время дегустации? Сейчас {now_hm}. "
-        "Введи HH:MM, нажми «Текущее время» или пропусти.",
+        "Введи ЧЧ:ММ, нажми «🕒 Текущее время» или пропусти.",
         reply_markup=time_kb().as_markup(),
     )
     await state.set_state(NewTasting.tasted_at)
@@ -1278,7 +1315,7 @@ async def time_now(call: CallbackQuery, state: FSMContext):
         reply_markup=skip_kb("gear").as_markup(),
     )
     await state.set_state(NewTasting.gear)
-    await call.answer()
+    await call.answer("Установлено текущее время")
 
 
 async def tasted_at_skip(call: CallbackQuery, state: FSMContext):
@@ -1289,7 +1326,7 @@ async def tasted_at_skip(call: CallbackQuery, state: FSMContext):
         reply_markup=skip_kb("gear").as_markup(),
     )
     await state.set_state(NewTasting.gear)
-    await call.answer()
+    await call.answer("Пропущено")
 
 
 async def tasted_at_in(message: Message, state: FSMContext):
@@ -3059,21 +3096,39 @@ async def on_start(message: Message):
     await show_main_menu(message.bot, message.chat.id)
 
 
+def help_text(is_admin: bool) -> str:
+    lines = [
+        "Команды:",
+        "/start — главное меню",
+        "/help — помощь",
+        "/new — новая дегустация",
+        "/find — найти запись",
+        "/cancel — отмена текущего шага",
+    ]
+    if is_admin and DIAGNOSTICS_ENABLED:
+        lines.extend(
+            [
+                "",
+                "Админ:",
+                "/whoami",
+                "/dbinfo",
+                "/health",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def help_markup() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="◀️ В меню", callback_data="to_menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 async def help_cmd(message: Message):
-    await message.answer(
-        "/start — меню\n"
-        "/new — новая дегустация\n"
-        "/find — поиск (по названию, категории, году, рейтингу, последние 5)\n"
-        "/last — последние 5\n"
-        "/tz — часовой пояс\n"
-        "/menu — включить кнопки под вводом (сквозное меню)\n"
-        "/hide — скрыть кнопки\n"
-        "/reset — сброс и возврат в меню\n"
-        "/resetstate — сбросить состояние\n"
-        "/cancel — сброс текущего действия\n"
-        "/edit <id или #N> — редактировать запись\n"
-        "/delete <id или #N> — удалить запись"
-    )
+    uid = getattr(message.from_user, "id", None)
+    is_admin = bool(uid in ADMINS)
+    await message.answer(help_text(is_admin), reply_markup=help_markup())
 
 
 async def cancel_cmd(message: Message, state: FSMContext):
@@ -3120,21 +3175,9 @@ async def reply_buttons_router(message: Message, state: FSMContext):
 
 
 async def help_cb(call: CallbackQuery):
-    await call.message.answer(
-        "/start — меню\n"
-        "/new — новая дегустация\n"
-        "/find — поиск (по названию, категории, году, рейтингу, последние 5)\n"
-        "/last — последние 5\n"
-        "/tz — часовой пояс\n"
-        "/menu — включить кнопки под вводом (сквозное меню)\n"
-        "/hide — скрыть кнопки\n"
-        "/reset — сброс и возврат в меню\n"
-        "/resetstate — сбросить состояние\n"
-        "/cancel — сброс текущего действия\n"
-        "/edit <id или #N> — редактировать запись\n"
-        "/delete <id или #N> — удалить запись",
-        reply_markup=search_menu_kb().as_markup(),
-    )
+    uid = getattr(call.from_user, "id", None)
+    is_admin = bool(uid in ADMINS)
+    await call.message.answer(help_text(is_admin), reply_markup=help_markup())
     await call.answer()
 
 
@@ -3261,6 +3304,7 @@ def setup_handlers(dp: Dispatcher):
     dp.callback_query.register(help_cb, F.data == "help")
     dp.callback_query.register(back_main, F.data == "back:main")
     dp.callback_query.register(nav_home, F.data == "nav:home")
+    dp.callback_query.register(nav_home, F.data == "to_menu")
 
     dp.callback_query.register(cat_pick, F.data.startswith("cat:"))
     dp.callback_query.register(s_cat_pick, F.data.startswith("scat:"))
@@ -3325,21 +3369,11 @@ def setup_handlers(dp: Dispatcher):
 async def set_bot_commands(bot: Bot):
     commands = [
         BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="help", description="Помощь"),
         BotCommand(command="new", description="Новая дегустация"),
         BotCommand(command="find", description="Поиск"),
-        BotCommand(command="last", description="Последние 5"),
-        BotCommand(command="tz", description="Часовой пояс"),
-        BotCommand(command="reset", description="Сброс и меню"),
-        BotCommand(command="help", description="Помощь"),
+        BotCommand(command="cancel", description="Отмена шага"),
     ]
-    if DIAGNOSTICS_ENABLED:
-        commands.extend(
-            [
-                BotCommand(command="whoami", description="Проверка статуса"),
-                BotCommand(command="health", description="Проверка БД"),
-                BotCommand(command="dbinfo", description="Сведения о БД"),
-            ]
-        )
     await bot.set_my_commands(commands)
 
 
