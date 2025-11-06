@@ -5,6 +5,7 @@ import html
 import io
 import logging
 import os
+import re
 import time
 from contextlib import suppress
 from typing import Dict, List, Optional, Tuple, TypedDict, Union
@@ -46,6 +47,14 @@ DIAGNOSTICS_ENABLED = not (IS_PROD and not ADMINS)
 
 # ---------------- ЧАСОВОЙ ПОЯС ----------------
 
+TZ_OFFSET_PATTERN = re.compile(
+    r"^(?P<sign>[+-])?(?P<hours>\d{1,2})(?:(?P<sep>[:.])(?P<minutes>\d{1,2}))?$"
+)
+TZ_OFFSET_ERROR = (
+    "Формат: /tz +3, /tz -2, /tz +5:30. Допустимы только целые часы или :30. "
+    "Диапазон UTC−12…UTC+14."
+)
+
 
 def get_user_now_hm(uid: int) -> str:
     u = get_or_create_user(uid)
@@ -53,6 +62,63 @@ def get_user_now_hm(uid: int) -> str:
     now_utc = datetime.datetime.utcnow()
     local_dt = now_utc + datetime.timedelta(minutes=off)
     return local_dt.strftime("%H:%M")
+
+
+def parse_tz_offset(raw: str) -> int:
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError
+
+    lowered = text.casefold()
+    if lowered.startswith("utc"):
+        lowered = lowered[3:].strip()
+
+    match = TZ_OFFSET_PATTERN.fullmatch(lowered)
+    if not match:
+        raise ValueError
+
+    sign = match.group("sign") or "+"
+    hours = int(match.group("hours"))
+    sep = match.group("sep")
+    minutes_token = match.group("minutes") or ""
+    minutes = 0
+
+    if sep:
+        if sep == ":":
+            if minutes_token != "30":
+                raise ValueError
+            minutes = 30
+        elif sep == ".":
+            if minutes_token not in {"5"}:
+                raise ValueError
+            minutes = 30
+        else:
+            raise ValueError
+    elif minutes_token:
+        raise ValueError
+
+    if sign == "+" and hours == 14 and minutes:
+        raise ValueError
+    if sign == "-" and hours == 12 and minutes:
+        raise ValueError
+
+    offset = hours * 60 + minutes
+    if sign == "-":
+        offset = -offset
+
+    if offset < -12 * 60 or offset > 14 * 60:
+        raise ValueError
+
+    return offset
+
+
+def format_tz_offset(offset_min: int) -> str:
+    sign = "+" if offset_min >= 0 else "-"
+    minutes_abs = abs(offset_min)
+    hours, minutes = divmod(minutes_abs, 60)
+    if minutes:
+        return f"UTC{sign}{hours}:{minutes:02d}"
+    return f"UTC{sign}{hours}"
 
 
 def resolve_tasting(uid: int, identifier: str) -> Optional[Tasting]:
@@ -187,6 +253,15 @@ def reply_main_kb() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери действие",
+    )
+
+
+def skip_reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Пропустить")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder=None,
     )
 
 
@@ -480,6 +555,14 @@ def _safe_text(text: Optional[str]) -> str:
     return normalized if normalized else ZERO_WIDTH_SAFE
 
 
+def is_skip_input(text: Optional[str]) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    lowered = raw.casefold()
+    return lowered in {"пропустить", "/skip"}
+
+
 async def ui(target: Union[CallbackQuery, Message], text: str, reply_markup=None):
     safe_text = _safe_text(text)
     try:
@@ -538,10 +621,9 @@ def format_numeric_value(value: Union[int, float], decimals: Optional[int]) -> s
 
 
 async def ask_year_prompt(message: Message, state: FSMContext) -> None:
-    max_year = get_year_max_value()
-    prompt = f"Укажи год числом (1900–{max_year}). Можно пропустить."
+    prompt = "📅 Год сбора? Можно пропустить"
     await state.update_data(numpad_active=False)
-    await message.answer(prompt)
+    await message.answer(prompt, reply_markup=skip_reply_keyboard())
     await state.set_state(NewTasting.year)
 
 
@@ -554,13 +636,18 @@ async def ask_region_prompt(message: Message, state: FSMContext) -> None:
 
 async def ask_grams_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
-    await message.answer("Укажи граммовку чая в граммах (0.1–50). Можно пропустить.")
+    await message.answer(
+        "⚖️ Граммовка? Можно пропустить.", reply_markup=skip_reply_keyboard()
+    )
     await state.set_state(NewTasting.grams)
 
 
 async def ask_temp_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
-    await message.answer("Укажи температуру °C числом (40–100). Можно пропустить.")
+    await message.answer(
+        "🌡️ Температура, °C? Можно пропустить.",
+        reply_markup=skip_reply_keyboard(),
+    )
     await state.set_state(NewTasting.temp_c)
 
 
@@ -1335,11 +1422,11 @@ async def name_in(message: Message, state: FSMContext):
 
 
 async def year_in(message: Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    if raw.casefold() == "пропустить":
+    if is_skip_input(message.text):
         await skip_year_value(message, state)
         return
 
+    raw = (message.text or "").strip()
     await state.update_data(year_input=raw)
     try:
         value = parse_year_value(raw)
@@ -1398,11 +1485,11 @@ async def ask_optional_grams_msg(message: Message, state: FSMContext):
 
 
 async def grams_in(message: Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    if raw.casefold() == "пропустить":
+    if is_skip_input(message.text):
         await skip_grams_value(message, state)
         return
 
+    raw = (message.text or "").strip()
     await state.update_data(grams_input=raw)
     try:
         value = parse_grams_value(raw)
@@ -1415,11 +1502,11 @@ async def grams_in(message: Message, state: FSMContext):
 
 
 async def temp_in(message: Message, state: FSMContext):
-    raw = (message.text or "").strip()
-    if raw.casefold() == "пропустить":
+    if is_skip_input(message.text):
         await skip_temp_value(message, state)
         return
 
+    raw = (message.text or "").strip()
     await state.update_data(temp_input=raw)
     try:
         value = parse_temp_value(raw)
@@ -1621,14 +1708,11 @@ async def prompt_infusion_seconds(
         await proceed_to_infusion_color(target, state)
         return
 
-    prompt = (
-        "Введи времена проливов в секундах через пробел/запятую "
-        "(например: 10 15 20). Можно пропустить."
-    )
+    prompt = f"🫖 Пролив {n}. Время, сек?"
     if isinstance(target, CallbackQuery):
-        await target.message.answer(prompt)
+        await target.message.answer(prompt, reply_markup=skip_reply_keyboard())
     else:
-        await target.answer(prompt)
+        await target.answer(prompt, reply_markup=skip_reply_keyboard())
     await state.set_state(InfusionState.seconds)
 
 
@@ -1642,13 +1726,13 @@ async def start_infusion_block_call(call: CallbackQuery, state: FSMContext):
 
 
 async def inf_seconds(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
-    if text.casefold() == "пропустить":
+    if is_skip_input(message.text):
         await state.update_data(cur_seconds=None, pending_seconds=[], numpad_active=False)
         await remove_reply_keyboard(message)
         await ask_effects_prompt(message, state)
         return
 
+    text = (message.text or "").strip()
     try:
         values = parse_infusions_list(text, error_message=INFUSIONS_ERROR)
     except ValueError as exc:
@@ -3302,6 +3386,9 @@ def help_text(is_admin: bool) -> str:
         "/new — новая дегустация",
         "/find — найти запись",
         "/cancel — отмена текущего шага",
+        "",
+        "Настройки:",
+        "/tz — указать часовой пояс (UTC-сдвиг). Пример: /tz +3",
     ]
     if is_admin and DIAGNOSTICS_ENABLED:
         lines.extend(
@@ -3397,40 +3484,36 @@ async def nav_home(call: CallbackQuery, state: FSMContext):
 async def tz_cmd(message: Message):
     """
     /tz -> показать текущий сдвиг
-    /tz +3    /tz -5.5 -> сохранить новый сдвиг
+    /tz +3, /tz -2, /tz +5:30 -> сохранить новый сдвиг
     """
     parts = (message.text or "").split(maxsplit=1)
     uid = message.from_user.id
 
     if len(parts) == 1:
-        u = get_or_create_user(uid, message.from_user.username)
-        hours_float = (u.tz_offset_min or 0) / 60.0
-        sign = "+" if hours_float >= 0 else ""
+        user = get_or_create_user(uid, message.from_user.username)
+        offset_min = user.tz_offset_min or 0
+        current = format_tz_offset(offset_min)
         await message.answer(
-            "Твой локальный сдвиг (UTC): "
-            f"UTC{sign}{hours_float:g}\n\n"
-            "Чтобы поменять:\n"
+            "Твой сдвиг (UTC): "
+            f"{current}\n\n"
+            "Чтобы изменить:\n"
             "/tz +3\n"
-            "/tz -5.5"
+            "/tz -2\n"
+            "/tz +5:30"
         )
         return
 
     raw = parts[1].strip()
-    raw = raw.replace("UTC", "").replace("utc", "")
     try:
-        hours_float = float(raw)
-    except Exception:
-        await message.answer(
-            "Не понял формат. Пример: /tz +3 или /tz -5.5"
-        )
+        offset_min = parse_tz_offset(raw)
+    except ValueError:
+        await message.answer(TZ_OFFSET_ERROR)
         return
 
-    offset_min = int(round(hours_float * 60))
     set_user_timezone(uid, offset_min)
-    sign = "+" if hours_float >= 0 else ""
+    formatted = format_tz_offset(offset_min)
     await message.answer(
-        f"Запомнил UTC{sign}{hours_float:g}. "
-        "Теперь буду подставлять твоё локальное время."
+        f"Запомнил {formatted}. Теперь буду подставлять твоё локальное время."
     )
 
 
@@ -3570,6 +3653,7 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="help", description="Помощь"),
         BotCommand(command="new", description="Новая дегустация"),
         BotCommand(command="find", description="Поиск"),
+        BotCommand(command="tz", description="Часовой пояс (UTC-сдвиг)"),
         BotCommand(command="cancel", description="Отмена шага"),
     ]
     await bot.set_my_commands(commands)
