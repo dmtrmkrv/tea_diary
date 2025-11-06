@@ -482,9 +482,12 @@ class EditFlow(StatesGroup):
 
 # ---------------- ХЭЛПЕРЫ UI ----------------
 
+ZERO_WIDTH_SAFE = "\u2060"
+
+
 def _safe_text(text: Optional[str]) -> str:
     normalized = (text or "").strip()
-    return normalized if normalized else "\u2060"
+    return normalized if normalized else ZERO_WIDTH_SAFE
 
 
 async def ui(target: Union[CallbackQuery, Message], text: str, reply_markup=None):
@@ -506,7 +509,7 @@ async def ui(target: Union[CallbackQuery, Message], text: str, reply_markup=None
 
 
 async def remove_reply_keyboard(message: Message) -> None:
-    removal = await message.answer("\u200b", reply_markup=ReplyKeyboardRemove())
+    removal = await message.answer(_safe_text(None), reply_markup=ReplyKeyboardRemove())
     with suppress(TelegramBadRequest):
         await removal.delete()
 
@@ -607,6 +610,13 @@ async def ask_year_prompt(message: Message, state: FSMContext) -> None:
     await state.set_state(NewTasting.year)
 
 
+async def ask_region_prompt(message: Message, state: FSMContext) -> None:
+    await message.answer(
+        "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
+    )
+    await state.set_state(NewTasting.region)
+
+
 async def ask_grams_prompt(message: Message, state: FSMContext) -> None:
     config = NUMPAD_CONFIGS.get(NewTasting.grams.state)
     if not config:
@@ -649,19 +659,13 @@ async def finalize_year_input(message: Message, state: FSMContext, value: int) -
         numpad_active=False,
     )
     await remove_reply_keyboard(message)
-    await message.answer(
-        "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
-    )
-    await state.set_state(NewTasting.region)
+    await ask_region_prompt(message, state)
 
 
 async def skip_year_value(message: Message, state: FSMContext) -> None:
     await state.update_data(year=None, year_input="", numpad_active=False)
     await remove_reply_keyboard(message)
-    await message.answer(
-        "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
-    )
-    await state.set_state(NewTasting.region)
+    await ask_region_prompt(message, state)
 
 
 async def finalize_grams_input(message: Message, state: FSMContext, value: float) -> None:
