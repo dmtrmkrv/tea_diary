@@ -1,3 +1,3 @@
-from .numpad_active import NumpadActive, NumpadActiveCallback
+from .admin_only import AdminOnly
 
-__all__ = ("NumpadActive", "NumpadActiveCallback")
+__all__ = ("AdminOnly",)
