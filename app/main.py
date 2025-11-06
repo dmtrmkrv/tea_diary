@@ -29,6 +29,7 @@ from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
 from app.db.models import Infusion, Photo, Tasting, User
 from app.routers.diagnostics import create_router
+from app.ui import skip_inline_kb
 from app.utils.admins import get_admin_ids
 from app.services.tastings import create_tasting
 from app.services.users import get_or_create_user, set_user_timezone
@@ -253,15 +254,6 @@ def reply_main_kb() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери действие",
-    )
-
-
-def skip_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Пропустить")]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder=None,
     )
 
 
@@ -623,7 +615,7 @@ def format_numeric_value(value: Union[int, float], decimals: Optional[int]) -> s
 async def ask_year_prompt(message: Message, state: FSMContext) -> None:
     prompt = "📅 Год сбора? Можно пропустить"
     await state.update_data(numpad_active=False)
-    await message.answer(prompt, reply_markup=skip_reply_keyboard())
+    await message.answer(prompt, reply_markup=skip_inline_kb("year"))
     await state.set_state(NewTasting.year)
 
 
@@ -637,7 +629,7 @@ async def ask_region_prompt(message: Message, state: FSMContext) -> None:
 async def ask_grams_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
     await message.answer(
-        "⚖️ Граммовка? Можно пропустить.", reply_markup=skip_reply_keyboard()
+        "⚖️ Граммовка? Можно пропустить.", reply_markup=skip_inline_kb("grams")
     )
     await state.set_state(NewTasting.grams)
 
@@ -646,7 +638,7 @@ async def ask_temp_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
     await message.answer(
         "🌡️ Температура, °C? Можно пропустить.",
-        reply_markup=skip_reply_keyboard(),
+        reply_markup=skip_inline_kb("temp"),
     )
     await state.set_state(NewTasting.temp_c)
 
@@ -684,6 +676,14 @@ async def skip_year_value(message: Message, state: FSMContext) -> None:
     await ask_region_prompt(message, state)
 
 
+async def skip_year_callback(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(year=None, year_input="", numpad_active=False)
+    await call.answer("Пропущено")
+    with suppress(Exception):
+        await call.message.edit_reply_markup(reply_markup=None)
+    return await ask_region_prompt(call.message, state)
+
+
 async def finalize_grams_input(message: Message, state: FSMContext, value: float) -> None:
     formatted = format_numeric_value(value, decimals=1)
     await state.update_data(
@@ -699,6 +699,14 @@ async def skip_grams_value(message: Message, state: FSMContext) -> None:
     await state.update_data(grams=None, grams_input="", numpad_active=False)
     await remove_reply_keyboard(message)
     await ask_temp_prompt(message, state)
+
+
+async def skip_grams_callback(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(grams=None, grams_input="", numpad_active=False)
+    await call.answer("Пропущено")
+    with suppress(Exception):
+        await call.message.edit_reply_markup(reply_markup=None)
+    return await ask_temp_prompt(call.message, state)
 
 
 async def finalize_temp_input(message: Message, state: FSMContext, value: int) -> None:
@@ -724,6 +732,15 @@ async def skip_temp_value(
     await remove_reply_keyboard(message)
     if uid is not None:
         await ask_tasted_at_prompt(message, state, uid)
+
+
+async def skip_temp_callback(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(temp_c=None, temp_input="", numpad_active=False)
+    await call.answer("Пропущено")
+    with suppress(Exception):
+        await call.message.edit_reply_markup(reply_markup=None)
+    uid = call.from_user.id
+    return await ask_tasted_at_prompt(call, state, uid)
 
 
 
@@ -1710,9 +1727,9 @@ async def prompt_infusion_seconds(
 
     prompt = f"🫖 Пролив {n}. Время, сек?"
     if isinstance(target, CallbackQuery):
-        await target.message.answer(prompt, reply_markup=skip_reply_keyboard())
+        await target.message.answer(prompt, reply_markup=skip_inline_kb("infusion"))
     else:
-        await target.answer(prompt, reply_markup=skip_reply_keyboard())
+        await target.answer(prompt, reply_markup=skip_inline_kb("infusion"))
     await state.set_state(InfusionState.seconds)
 
 
@@ -1761,6 +1778,14 @@ async def inf_seconds(message: Message, state: FSMContext):
         )
 
     await proceed_to_infusion_color(message, state)
+
+
+async def skip_infusion_seconds_callback(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(cur_seconds=None, pending_seconds=[], numpad_active=False)
+    await call.answer("Пропущено")
+    with suppress(Exception):
+        await call.message.edit_reply_markup(reply_markup=None)
+    return await ask_effects_prompt(call, state)
 
 
 async def proceed_to_infusion_color(
@@ -3593,6 +3618,20 @@ def setup_handlers(dp: Dispatcher):
     dp.callback_query.register(cat_pick, F.data.startswith("cat:"))
     dp.callback_query.register(s_cat_pick, F.data.startswith("scat:"))
 
+    dp.callback_query.register(
+        skip_year_callback, StateFilter(NewTasting.year), F.data == "skip:year"
+    )
+    dp.callback_query.register(
+        skip_grams_callback, StateFilter(NewTasting.grams), F.data == "skip:grams"
+    )
+    dp.callback_query.register(
+        skip_temp_callback, StateFilter(NewTasting.temp_c), F.data == "skip:temp"
+    )
+    dp.callback_query.register(
+        skip_infusion_seconds_callback,
+        StateFilter(InfusionState.seconds),
+        F.data == "skip:infusion",
+    )
     dp.callback_query.register(region_skip, F.data == "skip:region")
     dp.callback_query.register(time_now, F.data == "time:now")
     dp.callback_query.register(tasted_at_skip, F.data == "skip:tasted_at")
