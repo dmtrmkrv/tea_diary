@@ -33,7 +33,7 @@ from app.ui import skip_inline_kb
 from app.utils.admins import get_admin_ids
 from app.services.tastings import create_tasting
 from app.services.users import get_or_create_user, set_user_timezone
-from app.validators import parse_float, parse_infusions_list, parse_int
+from app.validators import parse_float, parse_int
 # fmt: on
 
 # ---------------- ЛОГИ ----------------
@@ -157,7 +157,6 @@ BODY_PRESETS = ["тонкое", "лёгкое", "среднее", "плотно�
 YEAR_MIN = 1900
 GRAMS_ERROR = "Граммовка от 0.1 до 50 г (например, 3.5)."
 TEMP_ERROR = "Температура от 40 до 100 °C."
-INFUSIONS_ERROR = "Проверь формат: секунды 1–600, пример: 10 15 20."
 
 EFFECTS = [
     "Тепло",
@@ -547,6 +546,66 @@ def _safe_text(text: Optional[str]) -> str:
     return normalized if normalized else ZERO_WIDTH_SAFE
 
 
+async def send_live_question(
+    message_or_bot: Union[CallbackQuery, Message, Bot],
+    chat_id: int,
+    text: Optional[str],
+    reply_markup=None,
+    *,
+    state: FSMContext,
+):
+    """Send a question message, replacing the previous live prompt if present."""
+
+    if isinstance(message_or_bot, CallbackQuery):
+        bot = (
+            message_or_bot.message.bot
+            if message_or_bot.message
+            else message_or_bot.bot
+        )
+    elif isinstance(message_or_bot, Message):
+        bot = message_or_bot.bot
+    else:
+        bot = message_or_bot
+
+    data = await state.get_data()
+    prev_qid = data.get("live_qid")
+    if prev_qid:
+        with suppress(Exception):
+            await bot.delete_message(chat_id, prev_qid)
+
+    safe_text = _safe_text(text)
+    sent = await bot.send_message(chat_id, safe_text, reply_markup=reply_markup)
+    await state.update_data(live_qid=sent.message_id)
+    return sent
+
+
+async def clear_live_question(
+    message_or_bot: Union[CallbackQuery, Message, Bot],
+    chat_id: int,
+    *,
+    state: FSMContext,
+):
+    """Remove stored live question message if it exists."""
+
+    if isinstance(message_or_bot, CallbackQuery):
+        bot = (
+            message_or_bot.message.bot
+            if message_or_bot.message
+            else message_or_bot.bot
+        )
+    elif isinstance(message_or_bot, Message):
+        bot = message_or_bot.bot
+    else:
+        bot = message_or_bot
+
+    data = await state.get_data()
+    prev_qid = data.get("live_qid")
+    if prev_qid:
+        with suppress(Exception):
+            await bot.delete_message(chat_id, prev_qid)
+    await state.update_data(live_qid=None)
+
+
 def is_skip_input(text: Optional[str]) -> bool:
     raw = (text or "").strip()
     if not raw:
@@ -573,12 +632,6 @@ async def ui(target: Union[CallbackQuery, Message], text: str, reply_markup=None
             await target.answer(safe_text, reply_markup=reply_markup)
 
 
-async def remove_reply_keyboard(message: Message) -> None:
-    removal = await message.answer(_safe_text(None), reply_markup=ReplyKeyboardRemove())
-    with suppress(TelegramBadRequest):
-        await removal.delete()
-
-
 def get_year_max_value() -> int:
     return datetime.datetime.utcnow().year + 1
 
@@ -603,19 +656,16 @@ def parse_grams_value(raw: str) -> float:
     )
 
 
-def format_numeric_value(value: Union[int, float], decimals: Optional[int]) -> str:
-    if decimals is not None and decimals > 0:
-        text = f"{float(value):.{decimals}f}"
-        if "." in text:
-            text = text.rstrip("0").rstrip(".")
-        return text
-    return str(int(round(float(value))))
-
-
 async def ask_year_prompt(message: Message, state: FSMContext) -> None:
-    prompt = "📅 Год сбора? Можно пропустить"
+    prompt = "📅 Укажите год сбора числом. Можно пропустить"
     await state.update_data(numpad_active=False)
-    await message.answer(prompt, reply_markup=skip_inline_kb("year"))
+    await send_live_question(
+        message,
+        message.chat.id,
+        prompt,
+        reply_markup=skip_inline_kb("year"),
+        state=state,
+    )
     await state.set_state(NewTasting.year)
 
 
@@ -628,17 +678,24 @@ async def ask_region_prompt(message: Message, state: FSMContext) -> None:
 
 async def ask_grams_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
-    await message.answer(
-        "⚖️ Граммовка? Можно пропустить.", reply_markup=skip_inline_kb("grams")
+    await send_live_question(
+        message,
+        message.chat.id,
+        "⚖️ Граммовка? Можно пропустить.",
+        reply_markup=skip_inline_kb("grams"),
+        state=state,
     )
     await state.set_state(NewTasting.grams)
 
 
 async def ask_temp_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
-    await message.answer(
+    await send_live_question(
+        message,
+        message.chat.id,
         "🌡️ Температура, °C? Можно пропустить.",
         reply_markup=skip_inline_kb("temp"),
+        state=state,
     )
     await state.set_state(NewTasting.temp_c)
 
@@ -659,88 +716,43 @@ async def ask_tasted_at_prompt(
     await state.set_state(NewTasting.tasted_at)
 
 
-async def finalize_year_input(message: Message, state: FSMContext, value: int) -> None:
-    formatted = format_numeric_value(value, decimals=0)
-    await state.update_data(
-        year=value,
-        year_input=formatted,
-        numpad_active=False,
-    )
-    await remove_reply_keyboard(message)
-    await ask_region_prompt(message, state)
-
-
 async def skip_year_value(message: Message, state: FSMContext) -> None:
-    await state.update_data(year=None, year_input="", numpad_active=False)
-    await remove_reply_keyboard(message)
+    await clear_live_question(message, message.chat.id, state=state)
+    await state.update_data(year=None, numpad_active=False)
     await ask_region_prompt(message, state)
 
 
 async def skip_year_callback(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(year=None, year_input="", numpad_active=False)
+    await state.update_data(year=None, numpad_active=False)
     await call.answer("Пропущено")
-    with suppress(Exception):
-        await call.message.edit_reply_markup(reply_markup=None)
-    return await ask_region_prompt(call.message, state)
-
-
-async def finalize_grams_input(message: Message, state: FSMContext, value: float) -> None:
-    formatted = format_numeric_value(value, decimals=1)
-    await state.update_data(
-        grams=value,
-        grams_input=formatted,
-        numpad_active=False,
-    )
-    await remove_reply_keyboard(message)
-    await ask_temp_prompt(message, state)
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await ask_region_prompt(call.message, state)
 
 
 async def skip_grams_value(message: Message, state: FSMContext) -> None:
-    await state.update_data(grams=None, grams_input="", numpad_active=False)
-    await remove_reply_keyboard(message)
+    await clear_live_question(message, message.chat.id, state=state)
+    await state.update_data(grams=None, numpad_active=False)
     await ask_temp_prompt(message, state)
 
 
 async def skip_grams_callback(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(grams=None, grams_input="", numpad_active=False)
+    await state.update_data(grams=None, numpad_active=False)
     await call.answer("Пропущено")
-    with suppress(Exception):
-        await call.message.edit_reply_markup(reply_markup=None)
-    return await ask_temp_prompt(call.message, state)
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await ask_temp_prompt(call.message, state)
 
 
-async def finalize_temp_input(message: Message, state: FSMContext, value: int) -> None:
-    formatted = format_numeric_value(value, decimals=0)
-    await state.update_data(
-        temp_c=value,
-        temp_input=formatted,
-        numpad_active=False,
-    )
-    await remove_reply_keyboard(message)
+async def skip_temp_value(message: Message, state: FSMContext) -> None:
+    await clear_live_question(message, message.chat.id, state=state)
+    await state.update_data(temp_c=None, numpad_active=False)
     await ask_tasted_at_prompt(message, state, message.from_user.id)
 
 
-async def skip_temp_value(
-    message: Message, state: FSMContext, uid: Optional[int] = None
-) -> None:
-    if uid is None:
-        uid = getattr(message.from_user, "id", None)
-    if uid is None:
-        data = await state.get_data()
-        uid = data.get("user_id")
-    await state.update_data(temp_c=None, temp_input="", numpad_active=False)
-    await remove_reply_keyboard(message)
-    if uid is not None:
-        await ask_tasted_at_prompt(message, state, uid)
-
-
 async def skip_temp_callback(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(temp_c=None, temp_input="", numpad_active=False)
+    await state.update_data(temp_c=None, numpad_active=False)
     await call.answer("Пропущено")
-    with suppress(Exception):
-        await call.message.edit_reply_markup(reply_markup=None)
-    uid = call.from_user.id
-    return await ask_tasted_at_prompt(call, state, uid)
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await ask_tasted_at_prompt(call, state, call.from_user.id)
 
 
 
@@ -1403,10 +1415,7 @@ async def start_new(state: FSMContext, uid: int):
         cur_taste_sel=[],
         cur_aftertaste_sel=[],
         new_photos=[],
-        pending_seconds=[],
-        year_input="",
-        grams_input="",
-        temp_input="",
+        live_qid=None,
         numpad_active=False,
     )
     await state.set_state(NewTasting.name)
@@ -1443,16 +1452,16 @@ async def year_in(message: Message, state: FSMContext):
         await skip_year_value(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
-    await state.update_data(year_input=raw)
-    try:
-        value = parse_year_value(raw)
-    except ValueError as exc:
-        await message.answer(str(exc))
-        await ask_year_prompt(message, state)
-        return
-
-    await finalize_year_input(message, state, value)
+    value: Optional[int] = None
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+    await state.update_data(year=value, numpad_active=False)
+    await ask_region_prompt(message, state)
 
 
 async def region_skip(call: CallbackQuery, state: FSMContext):
@@ -1506,16 +1515,17 @@ async def grams_in(message: Message, state: FSMContext):
         await skip_grams_value(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
-    await state.update_data(grams_input=raw)
-    try:
-        value = parse_grams_value(raw)
-    except ValueError as exc:
-        await message.answer(str(exc))
-        await ask_grams_prompt(message, state)
-        return
-
-    await finalize_grams_input(message, state, value)
+    value: Optional[float] = None
+    if raw:
+        normalized = raw.replace(",", ".")
+        try:
+            value = float(normalized)
+        except ValueError:
+            value = None
+    await state.update_data(grams=value, numpad_active=False)
+    await ask_temp_prompt(message, state)
 
 
 async def temp_in(message: Message, state: FSMContext):
@@ -1523,16 +1533,16 @@ async def temp_in(message: Message, state: FSMContext):
         await skip_temp_value(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
-    await state.update_data(temp_input=raw)
-    try:
-        value = parse_temp_value(raw)
-    except ValueError as exc:
-        await message.answer(str(exc))
-        await ask_temp_prompt(message, state)
-        return
-
-    await finalize_temp_input(message, state, value)
+    value: Optional[int] = None
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+    await state.update_data(temp_c=value, numpad_active=False)
+    await ask_tasted_at_prompt(message, state, message.from_user.id)
 
 
 async def time_now(call: CallbackQuery, state: FSMContext):
@@ -1711,12 +1721,10 @@ async def prompt_infusion_seconds(
     data = await state.get_data()
     n = data.get("infusion_n", 1)
     current = data.get("cur_seconds")
-    pending: List[int] = list(data.get("pending_seconds") or [])
-    if current is None and pending:
-        current = pending.pop(0)
-        await state.update_data(cur_seconds=current, pending_seconds=pending)
+    chat_id = target.message.chat.id if isinstance(target, CallbackQuery) else target.chat.id
 
     if current is not None:
+        await clear_live_question(target, chat_id, state=state)
         info_text = f"🫖 Пролив {n}. Время: {current} сек."
         if isinstance(target, CallbackQuery):
             await target.message.answer(info_text)
@@ -1726,10 +1734,13 @@ async def prompt_infusion_seconds(
         return
 
     prompt = f"🫖 Пролив {n}. Время, сек?"
-    if isinstance(target, CallbackQuery):
-        await target.message.answer(prompt, reply_markup=skip_inline_kb("infusion"))
-    else:
-        await target.answer(prompt, reply_markup=skip_inline_kb("infusion"))
+    await send_live_question(
+        target,
+        chat_id,
+        prompt,
+        reply_markup=skip_inline_kb("infusion"),
+        state=state,
+    )
     await state.set_state(InfusionState.seconds)
 
 
@@ -1744,48 +1755,30 @@ async def start_infusion_block_call(call: CallbackQuery, state: FSMContext):
 
 async def inf_seconds(message: Message, state: FSMContext):
     if is_skip_input(message.text):
-        await state.update_data(cur_seconds=None, pending_seconds=[], numpad_active=False)
-        await remove_reply_keyboard(message)
-        await ask_effects_prompt(message, state)
+        await clear_live_question(message, message.chat.id, state=state)
+        await state.update_data(cur_seconds=None, numpad_active=False)
+        await proceed_to_infusion_color(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     text = (message.text or "").strip()
-    try:
-        values = parse_infusions_list(text, error_message=INFUSIONS_ERROR)
-    except ValueError as exc:
-        await message.answer(str(exc))
-        await prompt_infusion_seconds(message, state)
-        return
-
-    data = await state.get_data()
-    existing = len(data.get("infusions", []))
-    total_requested = existing + len(values)
-    if total_requested > 30:
-        await message.answer(INFUSIONS_ERROR)
-        return
-
-    first = values[0]
-    rest = values[1:]
-    await state.update_data(cur_seconds=first, pending_seconds=rest)
-
-    await remove_reply_keyboard(message)
-
-    if rest:
-        rest_text = ", ".join(str(item) for item in rest)
-        await message.answer(
-            f"Принял список. Текущий пролив — {first} сек. "
-            f"Следующие: {rest_text}."
-        )
-
+    seconds_value: Optional[int] = None
+    if text:
+        match = re.search(r"-?\d+", text)
+        if match:
+            try:
+                seconds_value = int(match.group())
+            except ValueError:
+                seconds_value = None
+    await state.update_data(cur_seconds=seconds_value, numpad_active=False)
     await proceed_to_infusion_color(message, state)
 
 
 async def skip_infusion_seconds_callback(call: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(cur_seconds=None, pending_seconds=[], numpad_active=False)
+    await state.update_data(cur_seconds=None, numpad_active=False)
     await call.answer("Пропущено")
-    with suppress(Exception):
-        await call.message.edit_reply_markup(reply_markup=None)
-    return await ask_effects_prompt(call, state)
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await proceed_to_infusion_color(call, state)
 
 
 async def proceed_to_infusion_color(
@@ -3493,6 +3486,18 @@ async def help_cb(call: CallbackQuery):
     await call.answer()
 
 
+async def tz_menu_back(call: CallbackQuery):
+    await call.answer()
+    chat_id = call.from_user.id
+    if call.message:
+        chat_id = call.message.chat.id
+    with suppress(Exception):
+        if call.message:
+            await call.message.edit_reply_markup(reply_markup=None)
+    bot = call.message.bot if call.message else call.bot
+    await show_main_menu(bot, chat_id)
+
+
 async def back_main(call: CallbackQuery):
     await show_main_menu(call.message.bot, call.message.chat.id)
     await call.answer()
@@ -3518,13 +3523,19 @@ async def tz_cmd(message: Message):
         user = get_or_create_user(uid, message.from_user.username)
         offset_min = user.tz_offset_min or 0
         current = format_tz_offset(offset_min)
+        back_markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="↩ В меню", callback_data="menu:main")]
+            ]
+        )
         await message.answer(
             "Твой сдвиг (UTC): "
             f"{current}\n\n"
             "Чтобы изменить:\n"
             "/tz +3\n"
             "/tz -2\n"
-            "/tz +5:30"
+            "/tz +5:30",
+            reply_markup=back_markup,
         )
         return
 
@@ -3611,6 +3622,7 @@ def setup_handlers(dp: Dispatcher):
     dp.callback_query.register(new_cb, F.data == "new")
     dp.callback_query.register(find_cb, F.data == "find")
     dp.callback_query.register(help_cb, F.data == "help")
+    dp.callback_query.register(tz_menu_back, F.data == "menu:main")
     dp.callback_query.register(back_main, F.data == "back:main")
     dp.callback_query.register(nav_home, F.data == "nav:home")
     dp.callback_query.register(nav_home, F.data == "to_menu")
