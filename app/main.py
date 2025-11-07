@@ -1454,12 +1454,13 @@ async def year_in(message: Message, state: FSMContext):
 
     await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
-    value: Optional[int] = None
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = None
+    try:
+        value = parse_year_value(raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        await ask_year_prompt(message, state)
+        return
+
     await state.update_data(year=value, numpad_active=False)
     await ask_region_prompt(message, state)
 
@@ -1517,13 +1518,13 @@ async def grams_in(message: Message, state: FSMContext):
 
     await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
-    value: Optional[float] = None
-    if raw:
-        normalized = raw.replace(",", ".")
-        try:
-            value = float(normalized)
-        except ValueError:
-            value = None
+    try:
+        value = parse_grams_value(raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        await ask_grams_prompt(message, state)
+        return
+
     await state.update_data(grams=value, numpad_active=False)
     await ask_temp_prompt(message, state)
 
@@ -1535,12 +1536,13 @@ async def temp_in(message: Message, state: FSMContext):
 
     await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
-    value: Optional[int] = None
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = None
+    try:
+        value = parse_temp_value(raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        await ask_temp_prompt(message, state)
+        return
+
     await state.update_data(temp_c=value, numpad_active=False)
     await ask_tasted_at_prompt(message, state, message.from_user.id)
 
