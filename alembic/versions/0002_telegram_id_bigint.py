@@ -2,7 +2,7 @@
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.engine.reflection import Inspector
+from sqlalchemy import inspect
 
 
 revision = "0002_telegram_id_bigint"
@@ -16,7 +16,7 @@ TASTINGS = "tastings"
 
 
 def _drop_user_fk(bind, table):
-    insp = Inspector.from_engine(bind)
+    insp = inspect(bind)
     fks = [fk for fk in insp.get_foreign_keys(table) if fk.get("referred_table") == USERS]
     for fk in fks:
         name = fk.get("name")
