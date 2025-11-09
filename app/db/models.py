@@ -7,11 +7,14 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     desc,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 class Base(DeclarativeBase):
@@ -145,4 +148,31 @@ class Photo(Base):
     telegram_file_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     telegram_file_unique_id: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True
+    )
+
+
+JSONBType = JSONB().with_variant(JSON, "sqlite")
+
+
+class BotEvent(Base):
+    __tablename__ = "bot_events"
+    __table_args__ = (
+        Index("ix_bot_events_ts", "ts"),
+        Index("ix_bot_events_user_id", "user_id"),
+        Index("ix_bot_events_event_ts_desc", "event", desc("ts")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=False)
+    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    event: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
+    props: Mapped[dict] = mapped_column(
+        JSONBType,
+        nullable=False,
+        default=dict,
     )
