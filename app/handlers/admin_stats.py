@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy import func, select
 
-from app.db.engine import async_session
+from app.db import engine as db_engine
 from app.db.models import BotEvent
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ def create_router(admin_ids: Iterable[int]) -> Router:
         if user_id is None or user_id not in admins:
             return
 
-        session_factory = async_session
+        session_factory = getattr(db_engine, "async_session", None)
         if session_factory is None:
             logger.warning("Async session is not configured; /stats is unavailable")
             return

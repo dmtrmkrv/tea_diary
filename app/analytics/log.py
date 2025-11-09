@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from sqlalchemy import insert
 
-from app.db.engine import async_session
+from app.db import engine as db_engine
 from app.db.models import BotEvent
 
 
@@ -29,7 +29,7 @@ async def log_event(
         return
     if not event:
         return
-    session_factory = async_session
+    session_factory = getattr(db_engine, "async_session", None)
     if session_factory is None:
         return
 
