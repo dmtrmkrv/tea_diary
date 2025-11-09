@@ -29,6 +29,7 @@ from app.config import get_bot_token, get_db_url
 from app.db.engine import SessionLocal, create_sa_engine, startup_ping
 from app.db.models import Infusion, Photo, Tasting, User
 from app.routers.diagnostics import create_router
+from app.ui import skip_inline_kb
 from app.utils.admins import get_admin_ids
 from app.services.tastings import create_tasting
 from app.services.users import get_or_create_user, set_user_timezone
@@ -277,10 +278,6 @@ def skip_kb(tag: str) -> InlineKeyboardBuilder:
     kb.button(text="Пропустить", callback_data=f"skip:{tag}")
     kb.adjust(1)
     return kb
-
-
-def kb_inf_seconds() -> InlineKeyboardMarkup:
-    return skip_kb("infsec").as_markup()
 
 
 def time_kb() -> InlineKeyboardBuilder:
@@ -549,41 +546,6 @@ def _safe_text(text: Optional[str]) -> str:
     return normalized if normalized else ZERO_WIDTH_SAFE
 
 
-async def close_inline(call: CallbackQuery, status: str | None = None):
-    msg = call.message
-    if not msg:
-        return
-    txt = (getattr(msg, "caption", None) if getattr(msg, "photo", None) else msg.text) or ""
-    new_txt = f"{txt}\n\n✅ {status}" if status else txt
-    with suppress(Exception):
-        if getattr(msg, "photo", None) or getattr(msg, "caption", None) is not None:
-            await msg.edit_caption(new_txt)
-        else:
-            await msg.edit_text(new_txt)
-    with suppress(Exception):
-        await msg.edit_reply_markup()
-
-
-async def ask_next(after: Union[CallbackQuery, Message], state: FSMContext, text: str, kb=None):
-    data = await state.get_data()
-    prev_id = data.get("live_q_id")
-    bot = after.message.bot if isinstance(after, CallbackQuery) else after.bot
-    chat_id = after.message.chat.id if isinstance(after, CallbackQuery) else after.chat.id
-    if prev_id:
-        with suppress(Exception):
-            await bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_id, reply_markup=None)
-
-    base = after.message if isinstance(after, CallbackQuery) else after
-    sent = await base.answer(text, reply_markup=kb)
-    await state.update_data(live_q_id=sent.message_id)
-    return sent
-
-
-async def ack(message: Message, text: str):
-    with suppress(Exception):
-        await message.answer(f"✅ {text}")
-
-
 async def send_live_question(
     message_or_bot: Union[CallbackQuery, Message, Bot],
     chat_id: int,
@@ -606,14 +568,14 @@ async def send_live_question(
         bot = message_or_bot
 
     data = await state.get_data()
-    prev_qid = data.get("live_q_id")
+    prev_qid = data.get("live_qid")
     if prev_qid:
         with suppress(Exception):
             await bot.delete_message(chat_id, prev_qid)
 
     safe_text = _safe_text(text)
     sent = await bot.send_message(chat_id, safe_text, reply_markup=reply_markup)
-    await state.update_data(live_q_id=sent.message_id)
+    await state.update_data(live_qid=sent.message_id)
     return sent
 
 
@@ -637,11 +599,11 @@ async def clear_live_question(
         bot = message_or_bot
 
     data = await state.get_data()
-    prev_qid = data.get("live_q_id")
+    prev_qid = data.get("live_qid")
     if prev_qid:
         with suppress(Exception):
             await bot.delete_message(chat_id, prev_qid)
-    await state.update_data(live_q_id=None)
+    await state.update_data(live_qid=None)
 
 
 def is_skip_input(text: Optional[str]) -> bool:
@@ -694,49 +656,46 @@ def parse_grams_value(raw: str) -> float:
     )
 
 
-async def ask_year_prompt(
-    target: Union[Message, CallbackQuery], state: FSMContext
-) -> None:
+async def ask_year_prompt(message: Message, state: FSMContext) -> None:
     prompt = "📅 Укажите год сбора числом. Можно пропустить"
     await state.update_data(numpad_active=False)
-    await ask_next(target, state, prompt, skip_kb("year").as_markup())
+    await send_live_question(
+        message,
+        message.chat.id,
+        prompt,
+        reply_markup=skip_inline_kb("year"),
+        state=state,
+    )
     await state.set_state(NewTasting.year)
 
 
-async def ask_region_prompt(
-    target: Union[Message, CallbackQuery], state: FSMContext
-) -> None:
-    await ask_next(
-        target,
-        state,
-        "🗺️ Регион? Можно пропустить.",
-        skip_kb("region").as_markup(),
+async def ask_region_prompt(message: Message, state: FSMContext) -> None:
+    await message.answer(
+        "🗺️ Регион? Можно пропустить.", reply_markup=skip_kb("region").as_markup()
     )
     await state.set_state(NewTasting.region)
 
 
-async def ask_grams_prompt(
-    target: Union[Message, CallbackQuery], state: FSMContext
-) -> None:
+async def ask_grams_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
-    await ask_next(
-        target,
-        state,
+    await send_live_question(
+        message,
+        message.chat.id,
         "⚖️ Граммовка? Можно пропустить.",
-        skip_kb("grams").as_markup(),
+        reply_markup=skip_inline_kb("grams"),
+        state=state,
     )
     await state.set_state(NewTasting.grams)
 
 
-async def ask_temp_prompt(
-    target: Union[Message, CallbackQuery], state: FSMContext
-) -> None:
+async def ask_temp_prompt(message: Message, state: FSMContext) -> None:
     await state.update_data(numpad_active=False)
-    await ask_next(
-        target,
-        state,
+    await send_live_question(
+        message,
+        message.chat.id,
         "🌡️ Температура, °C? Можно пропустить.",
-        skip_kb("temp").as_markup(),
+        reply_markup=skip_inline_kb("temp"),
+        state=state,
     )
     await state.set_state(NewTasting.temp_c)
 
@@ -749,47 +708,51 @@ async def ask_tasted_at_prompt(
         f"⏰ Время дегустации? Сейчас {now_hm}. "
         "Введи ЧЧ:ММ, нажми «🕒 Текущее время» или пропусти."
     )
-    await ask_next(target, state, text, time_kb().as_markup())
+    markup = time_kb().as_markup()
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
     await state.set_state(NewTasting.tasted_at)
 
 
 async def skip_year_value(message: Message, state: FSMContext) -> None:
+    await clear_live_question(message, message.chat.id, state=state)
     await state.update_data(year=None, numpad_active=False)
-    await ack(message, "Год: пропущено")
     await ask_region_prompt(message, state)
 
 
 async def skip_year_callback(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(year=None, numpad_active=False)
-    await close_inline(call, "Год: пропущено")
-    await ask_region_prompt(call, state)
     await call.answer("Пропущено")
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await ask_region_prompt(call.message, state)
 
 
 async def skip_grams_value(message: Message, state: FSMContext) -> None:
+    await clear_live_question(message, message.chat.id, state=state)
     await state.update_data(grams=None, numpad_active=False)
-    await ack(message, "Граммовка: пропущено")
     await ask_temp_prompt(message, state)
 
 
 async def skip_grams_callback(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(grams=None, numpad_active=False)
-    await close_inline(call, "Граммовка: пропущено")
-    await ask_temp_prompt(call, state)
     await call.answer("Пропущено")
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await ask_temp_prompt(call.message, state)
 
 
 async def skip_temp_value(message: Message, state: FSMContext) -> None:
+    await clear_live_question(message, message.chat.id, state=state)
     await state.update_data(temp_c=None, numpad_active=False)
-    await ack(message, "Температура: пропущено")
     await ask_tasted_at_prompt(message, state, message.from_user.id)
 
 
 async def skip_temp_callback(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(temp_c=None, numpad_active=False)
-    await close_inline(call, "Температура: пропущено")
-    await ask_tasted_at_prompt(call, state, call.from_user.id)
     await call.answer("Пропущено")
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await ask_tasted_at_prompt(call, state, call.from_user.id)
 
 
 
@@ -1247,7 +1210,10 @@ async def append_current_infusion_and_prompt(msg_or_call, state: FSMContext):
 
     kb = yesno_more_infusions_kb().as_markup()
     text = "Добавить ещё пролив или завершаем?"
-    await ask_next(msg_or_call, state, text, kb)
+    if isinstance(msg_or_call, Message):
+        await msg_or_call.answer(text, reply_markup=kb)
+    else:
+        await ui(msg_or_call, text, reply_markup=kb)
 
 
 async def finalize_save(target_message: Message, state: FSMContext):
@@ -1449,7 +1415,7 @@ async def start_new(state: FSMContext, uid: int):
         cur_taste_sel=[],
         cur_aftertaste_sel=[],
         new_photos=[],
-        live_q_id=None,
+        live_qid=None,
         numpad_active=False,
     )
     await state.set_state(NewTasting.name)
@@ -1462,7 +1428,7 @@ async def new_cmd(message: Message, state: FSMContext):
     await flush_user_albums(uid, state, process=False)
     get_or_create_user(uid, message.from_user.username)
     await start_new(state, uid)
-    await ask_next(message, state, "🍵 Название чая?")
+    await message.answer("🍵 Название чая?")
 
 
 async def new_cb(call: CallbackQuery, state: FSMContext):
@@ -1472,16 +1438,12 @@ async def new_cb(call: CallbackQuery, state: FSMContext):
     await flush_user_albums(uid, state, process=False)
     get_or_create_user(uid, call.from_user.username)
     await start_new(state, uid)
-    await close_inline(call)
-    await ask_next(call, state, "🍵 Название чая?")
+    await ui(call, "🍵 Название чая?")
     await call.answer()
 
 
 async def name_in(message: Message, state: FSMContext):
-    title = (message.text or "").strip()
-    await state.update_data(name=title)
-    if title:
-        await ack(message, f"Название: {title}")
+    await state.update_data(name=message.text.strip())
     await ask_year_prompt(message, state)
 
 
@@ -1490,6 +1452,7 @@ async def year_in(message: Message, state: FSMContext):
         await skip_year_value(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
     try:
         value = parse_year_value(raw)
@@ -1499,14 +1462,12 @@ async def year_in(message: Message, state: FSMContext):
         return
 
     await state.update_data(year=value, numpad_active=False)
-    await ack(message, f"Год: {value}")
     await ask_region_prompt(message, state)
 
 
 async def region_skip(call: CallbackQuery, state: FSMContext):
     await state.update_data(region=None)
-    await close_inline(call, "Регион: пропущено")
-    await ask_next(call, state, "🏷️ Категория?", category_kb().as_markup())
+    await ui(call, "🏷️ Категория?", reply_markup=category_kb().as_markup())
     await state.set_state(NewTasting.category)
     await call.answer()
 
@@ -1514,22 +1475,20 @@ async def region_skip(call: CallbackQuery, state: FSMContext):
 async def region_in(message: Message, state: FSMContext):
     region = message.text.strip()
     await state.update_data(region=region if region else None)
-    if region:
-        await ack(message, f"Регион: {region}")
-    await ask_next(message, state, "🏷️ Категория?", category_kb().as_markup())
+    await message.answer(
+        "🏷️ Категория?", reply_markup=category_kb().as_markup()
+    )
     await state.set_state(NewTasting.category)
 
 
 async def cat_pick(call: CallbackQuery, state: FSMContext):
     _, val = call.data.split(":", 1)
     if val == "Другое":
-        await close_inline(call, "Категория: ввести текстом")
-        await ask_next(call, state, "Введи категорию текстом:")
+        await ui(call, "Введи категорию текстом:")
         await state.update_data(awaiting_custom_cat=True)
         await call.answer()
         return
     await state.update_data(category=val)
-    await close_inline(call, f"Категория: {val}")
     await ask_optional_grams_edit(call, state)
 
 
@@ -1537,15 +1496,14 @@ async def cat_custom_in(message: Message, state: FSMContext):
     data = await state.get_data()
     if not data.get("awaiting_custom_cat"):
         return
-    category = (message.text or "").strip()
-    await state.update_data(category=category, awaiting_custom_cat=False)
-    if category:
-        await ack(message, f"Категория: {category}")
+    await state.update_data(
+        category=message.text.strip(), awaiting_custom_cat=False
+    )
     await ask_optional_grams_msg(message, state)
 
 
 async def ask_optional_grams_edit(call: CallbackQuery, state: FSMContext):
-    await ask_grams_prompt(call, state)
+    await ask_grams_prompt(call.message, state)
     await call.answer()
 
 
@@ -1558,6 +1516,7 @@ async def grams_in(message: Message, state: FSMContext):
         await skip_grams_value(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
     try:
         value = parse_grams_value(raw)
@@ -1567,7 +1526,6 @@ async def grams_in(message: Message, state: FSMContext):
         return
 
     await state.update_data(grams=value, numpad_active=False)
-    await ack(message, f"Граммовка: {value:g} г")
     await ask_temp_prompt(message, state)
 
 
@@ -1576,6 +1534,7 @@ async def temp_in(message: Message, state: FSMContext):
         await skip_temp_value(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     raw = (message.text or "").strip()
     try:
         value = parse_temp_value(raw)
@@ -1585,19 +1544,16 @@ async def temp_in(message: Message, state: FSMContext):
         return
 
     await state.update_data(temp_c=value, numpad_active=False)
-    await ack(message, f"Температура: {value} °C")
     await ask_tasted_at_prompt(message, state, message.from_user.id)
 
 
 async def time_now(call: CallbackQuery, state: FSMContext):
     now_hm = get_user_now_hm(call.from_user.id)
     await state.update_data(tasted_at=now_hm)
-    await close_inline(call, f"Время дегустации: {now_hm}")
-    await ask_next(
+    await ui(
         call,
-        state,
         "🍶 Посудa дегустации? Можно пропустить.",
-        skip_kb("gear").as_markup(),
+        reply_markup=skip_kb("gear").as_markup(),
     )
     await state.set_state(NewTasting.gear)
     await call.answer("Установлено текущее время")
@@ -1605,12 +1561,10 @@ async def time_now(call: CallbackQuery, state: FSMContext):
 
 async def tasted_at_skip(call: CallbackQuery, state: FSMContext):
     await state.update_data(tasted_at=None)
-    await close_inline(call, "Время дегустации: пропущено")
-    await ask_next(
+    await ui(
         call,
-        state,
         "🍶 Посудa дегустации? Можно пропустить.",
-        skip_kb("gear").as_markup(),
+        reply_markup=skip_kb("gear").as_markup(),
     )
     await state.set_state(NewTasting.gear)
     await call.answer("Пропущено")
@@ -1620,29 +1574,21 @@ async def tasted_at_in(message: Message, state: FSMContext):
     text_val = message.text.strip()
     ta = text_val[:5] if ":" in text_val else None
     await state.update_data(tasted_at=ta)
-    if text_val:
-        await ack(message, f"Время дегустации: {text_val}")
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "🍶 Посудa дегустации? Можно пропустить.",
-        skip_kb("gear").as_markup(),
+        reply_markup=skip_kb("gear").as_markup(),
     )
     await state.set_state(NewTasting.gear)
 
 
 async def gear_skip(call: CallbackQuery, state: FSMContext):
     await state.update_data(gear=None)
-    await close_inline(call, "Посуда: пропущено")
     await ask_aroma_dry_call(call, state)
     await call.answer()
 
 
 async def gear_in(message: Message, state: FSMContext):
-    text_val = (message.text or "").strip()
-    await state.update_data(gear=text_val)
-    if text_val:
-        await ack(message, f"Посуда: {text_val}")
+    await state.update_data(gear=message.text.strip())
     await ask_aroma_dry_msg(message, state)
 
 
@@ -1651,11 +1597,9 @@ async def gear_in(message: Message, state: FSMContext):
 async def ask_aroma_dry_msg(message: Message, state: FSMContext):
     await state.update_data(aroma_dry_sel=[])
     kb = toggle_list_kb(DESCRIPTORS, [], "ad", include_other=True)
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "🌬️ Аромат сухого листа: выбери дескрипторы и нажми «Готово», или «Другое».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(NewTasting.aroma_dry)
 
@@ -1663,11 +1607,10 @@ async def ask_aroma_dry_msg(message: Message, state: FSMContext):
 async def ask_aroma_dry_call(call: CallbackQuery, state: FSMContext):
     await state.update_data(aroma_dry_sel=[])
     kb = toggle_list_kb(DESCRIPTORS, [], "ad", include_other=True)
-    await ask_next(
+    await ui(
         call,
-        state,
         "🌬️ Аромат сухого листа: выбери дескрипторы и нажми «Готово», или «Другое».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(NewTasting.aroma_dry)
 
@@ -1677,27 +1620,19 @@ async def aroma_dry_toggle(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected = data.get("aroma_dry_sel", [])
     if tail == "done":
-        value = ", ".join(selected) if selected else None
-        await state.update_data(
-            aroma_dry=value,
-            awaiting_custom_ad=False,
-        )
+        await state.update_data(aroma_dry=", ".join(selected) if selected else None)
         kb = toggle_list_kb(DESCRIPTORS, [], "aw", include_other=True)
-        summary = value if value else "не выбрано"
-        await close_inline(call, f"Аромат сухого листа: {summary}")
-        await ask_next(
+        await ui(
             call,
-            state,
             "🌬️ Аромат прогретого/промытого листа: выбери и нажми «Готово».",
-            kb.as_markup(),
+            reply_markup=kb.as_markup(),
         )
         await state.set_state(NewTasting.aroma_warmed)
         await call.answer()
         return
     if tail == "other":
         await state.update_data(awaiting_custom_ad=True)
-        await close_inline(call, "Аромат сухого листа: ввести текстом")
-        await ask_next(call, state, "Введи аромат сухого листа текстом:")
+        await ui(call, "Введи аромат сухого листа текстом:")
         await call.answer()
         return
     idx = int(tail)
@@ -1720,21 +1655,16 @@ async def aroma_dry_custom(message: Message, state: FSMContext):
     if not data.get("awaiting_custom_ad"):
         return
     selected = data.get("aroma_dry_sel", [])
-    txt = (message.text or "").strip()
-    if txt:
-        selected.append(txt)
+    if message.text.strip():
+        selected.append(message.text.strip())
     await state.update_data(
         aroma_dry=", ".join(selected) if selected else None,
         awaiting_custom_ad=False,
     )
-    summary = ", ".join(selected) if selected else "не выбрано"
-    await ack(message, f"Аромат сухого листа: {summary}")
     kb = toggle_list_kb(DESCRIPTORS, [], "aw", include_other=True)
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "🌬️ Аромат прогретого/промытого листа: выбери и нажми «Готово».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(NewTasting.aroma_warmed)
 
@@ -1744,19 +1674,15 @@ async def aroma_warmed_toggle(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected = data.get("aroma_warmed_sel", [])
     if tail == "done":
-        value = ", ".join(selected) if selected else None
         await state.update_data(
-            aroma_warmed=value,
-            awaiting_custom_aw=False,
+            aroma_warmed=", ".join(selected) if selected else None
         )
-        summary = value if value else "не выбрано"
-        await close_inline(call, f"Аромат прогретого листа: {summary}")
         await start_infusion_block_call(call, state)
+        await call.answer()
         return
     if tail == "other":
         await state.update_data(awaiting_custom_aw=True)
-        await close_inline(call, "Аромат прогретого листа: ввести текстом")
-        await ask_next(call, state, "Введи аромат прогретого/промытого листа текстом:")
+        await ui(call, "Введи аромат прогретого/промытого листа текстом:")
         await call.answer()
         return
     idx = int(tail)
@@ -1779,16 +1705,12 @@ async def aroma_warmed_custom(message: Message, state: FSMContext):
     if not data.get("awaiting_custom_aw"):
         return
     selected = data.get("aroma_warmed_sel", [])
-    txt = (message.text or "").strip()
-    if txt:
-        selected.append(txt)
-    value = ", ".join(selected) if selected else None
+    if message.text.strip():
+        selected.append(message.text.strip())
     await state.update_data(
-        aroma_warmed=value,
+        aroma_warmed=", ".join(selected) if selected else None,
         awaiting_custom_aw=False,
     )
-    summary = value if value else "не выбрано"
-    await ack(message, f"Аромат прогретого листа: {summary}")
     await start_infusion_block_msg(message, state)
 
 
@@ -1800,7 +1722,27 @@ async def prompt_infusion_seconds(
     await state.update_data(numpad_active=False)
     data = await state.get_data()
     n = data.get("infusion_n", 1)
-    await ask_next(target, state, f"🫖 Пролив {n}. Время, сек?", kb_inf_seconds())
+    current = data.get("cur_seconds")
+    chat_id = target.message.chat.id if isinstance(target, CallbackQuery) else target.chat.id
+
+    if current is not None:
+        await clear_live_question(target, chat_id, state=state)
+        info_text = f"🫖 Пролив {n}. Время: {current} сек."
+        if isinstance(target, CallbackQuery):
+            await target.message.answer(info_text)
+        else:
+            await target.answer(info_text)
+        await proceed_to_infusion_color(target, state)
+        return
+
+    prompt = f"🫖 Пролив {n}. Время, сек?"
+    await send_live_question(
+        target,
+        chat_id,
+        prompt,
+        reply_markup=skip_inline_kb("infusion"),
+        state=state,
+    )
     await state.set_state(InfusionState.seconds)
 
 
@@ -1815,11 +1757,12 @@ async def start_infusion_block_call(call: CallbackQuery, state: FSMContext):
 
 async def inf_seconds(message: Message, state: FSMContext):
     if is_skip_input(message.text):
+        await clear_live_question(message, message.chat.id, state=state)
         await state.update_data(cur_seconds=None, numpad_active=False)
-        await ack(message, "Время пролива: пропущено")
         await proceed_to_infusion_color(message, state)
         return
 
+    await clear_live_question(message, message.chat.id, state=state)
     text = (message.text or "").strip()
     seconds_value: Optional[int] = None
     if text:
@@ -1830,30 +1773,28 @@ async def inf_seconds(message: Message, state: FSMContext):
             except ValueError:
                 seconds_value = None
     await state.update_data(cur_seconds=seconds_value, numpad_active=False)
-    status = (
-        f"Время пролива: {seconds_value} сек" if seconds_value is not None else "Время пролива: пропущено"
-    )
-    await ack(message, status)
     await proceed_to_infusion_color(message, state)
 
 
-async def inf_seconds_skip(call: CallbackQuery, state: FSMContext):
+async def skip_infusion_seconds_callback(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(cur_seconds=None, numpad_active=False)
-    await close_inline(call, "Время пролива: пропущено")
-    await proceed_to_infusion_color(call, state)
     await call.answer("Пропущено")
+    await clear_live_question(call, call.message.chat.id, state=state)
+    await proceed_to_infusion_color(call, state)
 
 
 async def proceed_to_infusion_color(
     target: Union[Message, CallbackQuery], state: FSMContext
 ) -> None:
     markup = skip_kb("color").as_markup()
-    await ask_next(
-        target,
-        state,
-        "Цвет настоя пролива? Можно пропустить.",
-        markup,
-    )
+    if isinstance(target, CallbackQuery):
+        await target.message.answer(
+            "Цвет настоя пролива? Можно пропустить.", reply_markup=markup
+        )
+    else:
+        await target.answer(
+            "Цвет настоя пролива? Можно пропустить.", reply_markup=markup
+        )
     await state.set_state(InfusionState.color)
 
 
@@ -1861,29 +1802,22 @@ async def color_skip(call: CallbackQuery, state: FSMContext):
     await state.update_data(cur_color=None)
     await state.update_data(cur_taste_sel=[])
     kb = toggle_list_kb(DESCRIPTORS, [], "taste", include_other=True)
-    await close_inline(call, "Цвет пролива: пропущено")
-    await ask_next(
+    await ui(
         call,
-        state,
         "Вкус настоя: выбери дескрипторы и нажми «Готово», или «Другое».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(InfusionState.taste)
     await call.answer()
 
 
 async def inf_color(message: Message, state: FSMContext):
-    text_val = (message.text or "").strip()
-    await state.update_data(cur_color=text_val)
+    await state.update_data(cur_color=message.text.strip())
     await state.update_data(cur_taste_sel=[])
     kb = toggle_list_kb(DESCRIPTORS, [], "taste", include_other=True)
-    if text_val:
-        await ack(message, f"Цвет пролива: {text_val}")
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "Вкус настоя: выбери дескрипторы и нажми «Готово», или «Другое».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(InfusionState.taste)
 
@@ -1895,21 +1829,17 @@ async def taste_toggle(call: CallbackQuery, state: FSMContext):
     if tail == "done":
         text_val = ", ".join(selected) if selected else None
         await state.update_data(cur_taste=text_val, awaiting_custom_taste=False)
-        summary = text_val if text_val else "не выбрано"
-        await close_inline(call, f"Вкус пролива: {summary}")
-        await ask_next(
+        await ui(
             call,
-            state,
             "✨ Особенные ноты пролива? (можно пропустить)",
-            skip_kb("special").as_markup(),
+            reply_markup=skip_kb("special").as_markup(),
         )
         await state.set_state(InfusionState.special)
         await call.answer()
         return
     if tail == "other":
         await state.update_data(awaiting_custom_taste=True)
-        await close_inline(call, "Вкус пролива: ввести текстом")
-        await ask_next(call, state, "Введи вкус текстом:")
+        await ui(call, "Введи вкус текстом:")
         await call.answer()
         return
     idx = int(tail)
@@ -1930,87 +1860,65 @@ async def taste_toggle(call: CallbackQuery, state: FSMContext):
 async def taste_custom(message: Message, state: FSMContext):
     data = await state.get_data()
     if not data.get("awaiting_custom_taste"):
-        text_val = (message.text or "").strip() or None
-        await state.update_data(cur_taste=text_val, awaiting_custom_taste=False)
-        summary = text_val if text_val else "не указано"
-        await ack(message, f"Вкус пролива: {summary}")
-        await ask_next(
-            message,
-            state,
+        await state.update_data(cur_taste=message.text.strip() or None)
+        await message.answer(
             "✨ Особенные ноты пролива? (можно пропустить)",
-            skip_kb("special").as_markup(),
+            reply_markup=skip_kb("special").as_markup(),
         )
         await state.set_state(InfusionState.special)
         return
 
-    text_val = (message.text or "").strip() or None
     await state.update_data(
-        cur_taste=text_val,
+        cur_taste=message.text.strip() or None,
         awaiting_custom_taste=False,
     )
-    summary = text_val if text_val else "не указано"
-    await ack(message, f"Вкус пролива: {summary}")
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "✨ Особенные ноты пролива? (можно пропустить)",
-        skip_kb("special").as_markup(),
+        reply_markup=skip_kb("special").as_markup(),
     )
     await state.set_state(InfusionState.special)
 
 
 async def inf_taste(message: Message, state: FSMContext):
-    text_val = (message.text or "").strip() or None
     await state.update_data(
-        cur_taste=text_val,
+        cur_taste=message.text.strip() or None,
         awaiting_custom_taste=False,
     )
-    summary = text_val if text_val else "не указано"
-    await ack(message, f"Вкус пролива: {summary}")
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "✨ Особенные ноты пролива? (можно пропустить)",
-        skip_kb("special").as_markup(),
+        reply_markup=skip_kb("special").as_markup(),
     )
     await state.set_state(InfusionState.special)
 
 
 async def special_skip(call: CallbackQuery, state: FSMContext):
     await state.update_data(cur_special=None)
-    await close_inline(call, "Особенные ноты: пропущено")
-    await ask_next(call, state, "Тело настоя?", body_kb().as_markup())
+    await ui(call, "Тело настоя?", reply_markup=body_kb().as_markup())
     await state.set_state(InfusionState.body)
     await call.answer()
 
 
 async def inf_special(message: Message, state: FSMContext):
-    text_val = (message.text or "").strip()
-    await state.update_data(cur_special=text_val)
-    if text_val:
-        await ack(message, f"Особенные ноты: {text_val}")
-    await ask_next(message, state, "Тело настоя?", body_kb().as_markup())
+    await state.update_data(cur_special=message.text.strip())
+    await message.answer("Тело настоя?", reply_markup=body_kb().as_markup())
     await state.set_state(InfusionState.body)
 
 
 async def inf_body_pick(call: CallbackQuery, state: FSMContext):
     _, val = call.data.split(":", 1)
     if val == "other":
-        await close_inline(call, "Тело настоя: ввести текстом")
+        await ui(call, "Введи тело настоя текстом:")
         await state.update_data(awaiting_custom_body=True)
         await state.set_state(InfusionState.body)
-        await ask_next(call, state, "Введи тело настоя текстом:")
         await call.answer()
         return
     await state.update_data(cur_body=val)
     await state.update_data(cur_aftertaste_sel=[])
     kb = toggle_list_kb(AFTERTASTE_SET, [], "aft", include_other=True)
-    await close_inline(call, f"Тело настоя: {val}")
-    await ask_next(
+    await ui(
         call,
-        state,
         "Характер послевкусия: выбери пункты и нажми «Готово», или «Другое».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(InfusionState.aftertaste)
     await call.answer()
@@ -2020,20 +1928,13 @@ async def inf_body_custom(message: Message, state: FSMContext):
     data = await state.get_data()
     if not data.get("awaiting_custom_body"):
         return
-    text_val = (message.text or "").strip()
     await state.update_data(
-        cur_body=text_val, awaiting_custom_body=False
+        cur_body=message.text.strip(), awaiting_custom_body=False
     )
-    if text_val:
-        await ack(message, f"Тело настоя: {text_val}")
-    else:
-        await ack(message, "Тело настоя: не указано")
     kb = toggle_list_kb(AFTERTASTE_SET, [], "aft", include_other=True)
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "Характер послевкусия: выбери пункты и нажми «Готово», или «Другое».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(InfusionState.aftertaste)
 
@@ -2047,16 +1948,12 @@ async def aftertaste_toggle(call: CallbackQuery, state: FSMContext):
             cur_aftertaste=", ".join(selected) if selected else None,
             awaiting_custom_after=False,
         )
-        value = ", ".join(selected) if selected else None
-        summary = value if value else "не выбрано"
-        await close_inline(call, f"Послевкусие: {summary}")
         await append_current_infusion_and_prompt(call, state)
         await call.answer()
         return
     if tail == "other":
         await state.update_data(awaiting_custom_after=True)
-        await close_inline(call, "Послевкусие: ввести текстом")
-        await ask_next(call, state, "Введи характер послевкусия текстом:")
+        await ui(call, "Введи характер послевкусия текстом:")
         await call.answer()
         return
     idx = int(tail)
@@ -2097,15 +1994,12 @@ async def aftertaste_custom(message: Message, state: FSMContext):
 
     # Сохраняем введённый текст и сбрасываем флаг ожидания кастомного ввода
     await state.update_data(cur_aftertaste=txt, awaiting_custom_after=False)
-    summary = txt if txt else "не указано"
-    await ack(message, f"Послевкусие: {summary}")
 
     # Переходим к следующему шагу (добавляем текущую инфузию и задаём следующий вопрос)
     await append_current_infusion_and_prompt(message, state)
 
 
 async def more_infusions(call: CallbackQuery, state: FSMContext):
-    await close_inline(call, "Добавляем пролив")
     await start_infusion_block_call(call, state)
 
 
@@ -2113,17 +2007,15 @@ async def ask_effects_prompt(target: Union[Message, CallbackQuery], state: FSMCo
     data = await state.get_data()
     selected = data.get("effects", [])
     kb = toggle_list_kb(EFFECTS, selected, prefix="eff", include_other=True)
-    await ask_next(
+    await ui(
         target,
-        state,
         "Ощущения (мультивыбор). Жми пункты, затем «Готово», либо «Другое».",
-        kb.as_markup(),
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(EffectsScenarios.effects)
 
 
 async def finish_infusions(call: CallbackQuery, state: FSMContext):
-    await close_inline(call, "Проливы: завершено")
     await ask_effects_prompt(call, state)
     await call.answer()
 
@@ -2141,21 +2033,17 @@ async def eff_toggle_or_done(call: CallbackQuery, state: FSMContext):
             prefix="scn",
             include_other=True,
         )
-        summary = ", ".join(selected) if selected else "не выбрано"
-        await close_inline(call, f"Ощущения: {summary}")
-        await ask_next(
+        await ui(
             call,
-            state,
             "Сценарии (мультивыбор). Жми пункты, затем «Готово», либо «Другое».",
-            kb.as_markup(),
+            reply_markup=kb.as_markup(),
         )
         await state.set_state(EffectsScenarios.scenarios)
         await call.answer()
         return
     if tail == "other":
         await state.update_data(awaiting_custom_eff=True)
-        await close_inline(call, "Ощущения: ввести текстом")
-        await ask_next(call, state, "Введи ощущение текстом:")
+        await ui(call, "Введи ощущение текстом:")
         await call.answer()
         return
     idx = int(tail)
@@ -2187,13 +2075,9 @@ async def eff_custom(message: Message, state: FSMContext):
     kb = toggle_list_kb(
         EFFECTS, selected, prefix="eff", include_other=True
     )
-    if txt:
-        await ack(message, f"Ощущения: добавлено {txt}")
-    await ask_next(
-        message,
-        state,
-        "Ощущения (мультивыбор). Жми пункты, затем «Готово», либо «Другое».",
-        kb.as_markup(),
+    await message.answer(
+        "Добавил. Можешь выбрать ещё и нажать «Готово».",
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(EffectsScenarios.effects)
 
@@ -2203,16 +2087,17 @@ async def scn_toggle_or_done(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected = data.get("scenarios", [])
     if tail == "done":
-        summary = ", ".join(selected) if selected else "не выбрано"
-        await close_inline(call, f"Сценарии: {summary}")
-        await ask_next(call, state, "Оценка сорта 0..10?", rating_kb().as_markup())
+        await ui(
+            call,
+            "Оценка сорта 0..10?",
+            reply_markup=rating_kb().as_markup(),
+        )
         await state.set_state(RatingSummary.rating)
         await call.answer()
         return
     if tail == "other":
         await state.update_data(awaiting_custom_scn=True)
-        await close_inline(call, "Сценарии: ввести текстом")
-        await ask_next(call, state, "Введи сценарий текстом:")
+        await ui(call, "Введи сценарий текстом:")
         await call.answer()
         return
     idx = int(tail)
@@ -2244,13 +2129,9 @@ async def scn_custom(message: Message, state: FSMContext):
     kb = toggle_list_kb(
         SCENARIOS, selected, prefix="scn", include_other=True
     )
-    if txt:
-        await ack(message, f"Сценарий добавлен: {txt}")
-    await ask_next(
-        message,
-        state,
-        "Сценарии (мультивыбор). Жми пункты, затем «Готово», либо «Другое».",
-        kb.as_markup(),
+    await message.answer(
+        "Добавил. Можешь выбрать ещё и нажать «Готово».",
+        reply_markup=kb.as_markup(),
     )
     await state.set_state(EffectsScenarios.scenarios)
 
@@ -2258,12 +2139,10 @@ async def scn_custom(message: Message, state: FSMContext):
 async def rate_pick(call: CallbackQuery, state: FSMContext):
     _, val = call.data.split(":", 1)
     await state.update_data(rating=int(val))
-    await close_inline(call, f"Оценка: {val}/10")
-    await ask_next(
+    await ui(
         call,
-        state,
         "📝 Заметка по дегустации? (можно пропустить)",
-        skip_kb("summary").as_markup(),
+        reply_markup=skip_kb("summary").as_markup(),
     )
     await state.set_state(RatingSummary.summary)
     await call.answer()
@@ -2274,27 +2153,20 @@ async def rating_in(message: Message, state: FSMContext):
     rating = int(txt) if txt.isdigit() else 0
     rating = max(0, min(10, rating))
     await state.update_data(rating=rating)
-    await ack(message, f"Оценка: {rating}/10")
-    await ask_next(
-        message,
-        state,
+    await message.answer(
         "📝 Заметка по дегустации? (можно пропустить)",
-        skip_kb("summary").as_markup(),
+        reply_markup=skip_kb("summary").as_markup(),
     )
     await state.set_state(RatingSummary.summary)
 
 
 async def summary_in(message: Message, state: FSMContext):
-    text_val = (message.text or "").strip()
-    await state.update_data(summary=text_val)
-    if text_val:
-        await ack(message, f"Заметка: {text_val}")
+    await state.update_data(summary=message.text.strip())
     await prompt_photos(message, state)
 
 
 async def summary_skip(call: CallbackQuery, state: FSMContext):
     await state.update_data(summary=None)
-    await close_inline(call, "Заметка: пропущено")
     await prompt_photos(call, state)
     await call.answer()
 
@@ -3770,9 +3642,9 @@ def setup_handlers(dp: Dispatcher):
         skip_temp_callback, StateFilter(NewTasting.temp_c), F.data == "skip:temp"
     )
     dp.callback_query.register(
-        inf_seconds_skip,
+        skip_infusion_seconds_callback,
         StateFilter(InfusionState.seconds),
-        F.data == "skip:infsec",
+        F.data == "skip:infusion",
     )
     dp.callback_query.register(region_skip, F.data == "skip:region")
     dp.callback_query.register(time_now, F.data == "time:now")
